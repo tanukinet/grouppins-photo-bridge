@@ -8,6 +8,9 @@ UI なしミニアプリ。
 
 写真と位置情報という強い権限を要求するアプリなので、何ができないかを先に書く。
 
+- このアプリがすることは 2 つだけ。**写真の EXIF から GPS と撮影時刻を読む**ことと、
+  読んだ結果を **`https://grouppins.com/` を開く / 共有シートへ渡す**ことで、
+  それ以外の出口を持たない
 - **`INTERNET` 権限を宣言していない** ([AndroidManifest.xml](app/src/main/AndroidManifest.xml))。
   Android は未宣言のアプリからの通信を OS が拒否するため、写真も位置情報も
   どこかへ送信すること自体ができない
@@ -23,6 +26,9 @@ UI なしミニアプリ。
   (`PhotoBridge.WEBAPK_SIGNER_CERT_SHA256`)。`org.chromium.webapk.*` というパッケージ名と
   meta-data は誰でも名乗れるため、名前だけを信じて写真を渡さない。
   検証に通らなければ写真は渡さず、座標のみの URL 経路へ落ちる
+
+要求する権限が強い (`ACCESS_MEDIA_LOCATION` = 写真の位置情報) のは、
+それが無いと OS が GPS を消してしまうため。理由は[なぜ必要か](#なぜ必要か)に書いた。
 
 ## 自分で確かめる
 
@@ -90,9 +96,49 @@ URL パラメータで PWA へ渡すのがこのアプリの役割。
 - 共有シートから写真を「GroupPins 写真取込」へ共有 → 座標だけ URL で PWA へ (ShareActivity)
 - `grouppins-photo://pick` の intent 起動 (PickActivity。現行 PWA からは使わない)
 
+## 入手
+
+[Releases](../../releases) の APK を端末に入れる。
+
+```bash
+adb install -r grouppins-photo-bridge-<version>.apk
+```
+
+APK は **GitHub Actions が本 repo のソースからビルドして署名**している
+([.github/workflows/release.yml](.github/workflows/release.yml))。
+手元のバイナリが Releases のものと同一かは同梱の `.sha256` で確認できる。
+
+```bash
+sha256sum -c grouppins-photo-bridge-<version>.apk.sha256
+```
+
+CI は APK を公開する前に、署名が有効であることと `INTERNET` 権限が含まれないことを
+検証しており、どちらかが崩れるとリリース自体が失敗する。ビルドの実行ログは
+各リリースのノートからたどれる。
+
+### リリースを出す (メンテナ向け)
+
+署名鍵を repo secrets に入れておき、タグを打つ。
+
+```bash
+keytool -genkeypair -v -keystore release.jks -alias release \
+  -keyalg RSA -keysize 2048 -validity 10000
+gh secret set KEYSTORE_BASE64 < <(base64 -w0 release.jks)
+gh secret set KEYSTORE_PASSWORD
+gh secret set KEY_ALIAS
+gh secret set KEY_PASSWORD
+
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+`release.jks` は repo に入れない。これを失うと同じ署名で更新できなくなるため
+別途保管する。`versionName` はタグ (先頭の `v` を除いたもの)、`versionCode` は
+Actions の実行番号が入る。
+
 ## ビルドとインストール
 
-Android Studio でこのディレクトリを開いて `app` を実行 (端末を USB 接続)、または以下。
+自分でビルドする場合。Android Studio でこのディレクトリを開いて `app` を実行
+(端末を USB 接続)、または以下。
 
 ### 環境構築 (Ubuntu / WSL2。初回のみ)
 
@@ -131,9 +177,13 @@ APK は `app/build/outputs/apk/debug/app-debug.apk` に出る。
 
 `-r` は更新インストール用 (インストール済み端末で `-r` なしだと
 `INSTALL_FAILED_ALREADY_EXISTS` で失敗する。初回インストールでも付けて問題ない)。
-versionCode は 1 固定のため、どの版が入っているかは APK のビルド日時で判断する。
+debug ビルドの `versionCode` / `versionName` は 1 / 1.0 固定なので、どの版が入って
+いるかは APK のビルド日時で判断する。
 
-個人利用前提の野良 APK (debug ビルド) で十分。Play 配布は想定していない。
+`assembleRelease` は署名鍵 (`KEYSTORE_PATH` ほか) が無いと失敗する。未署名の APK を
+配ってしまわないための意図的な失敗で、手元での動作確認には `assembleDebug` を使う。
+
+Play 配布は想定していない (Releases の APK を直接入れる)。
 
 ## 注意
 

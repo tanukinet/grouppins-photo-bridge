@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val keystorePath: String? = System.getenv("KEYSTORE_PATH")
+
+gradle.taskGraph.whenReady {
+    if (keystorePath == null && allTasks.any { it.path.endsWith(":assembleRelease") }) {
+        throw GradleException(
+            "release ビルドには署名鍵が必要です。KEYSTORE_PATH / KEYSTORE_PASSWORD / " +
+                "KEY_ALIAS / KEY_PASSWORD を設定してください (未署名の APK は配布しない)",
+        )
+    }
+}
+
 android {
     namespace = "com.grouppins.photobridge"
     compileSdk = 35
@@ -11,8 +22,26 @@ android {
         applicationId = "com.grouppins.photobridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: "1.0"
+    }
+
+    signingConfigs {
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
+        }
     }
 
     compileOptions {
