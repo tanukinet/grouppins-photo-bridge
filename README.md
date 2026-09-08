@@ -13,8 +13,9 @@ UI なしミニアプリ。
   どこかへ送信すること自体ができない
 - ネットワーク系の API (`java.net` / `HttpURLConnection` / WebView 等) を
   1 つも import していない。Kotlin 5 ファイル・約 1,300 行で全部読める
-- 依存ライブラリは `androidx.exifinterface` (EXIF 読み取り) と `androidx.core`
-  (FileProvider) の 2 つだけ。解析ツール・広告 SDK の類は入っていない
+- 直接の依存ライブラリは `androidx.exifinterface` (EXIF 読み取り) と `androidx.core`
+  (FileProvider) の 2 つだけ。推移的に入るのも AndroidX と Kotlin の標準ライブラリのみで、
+  解析ツール・広告 SDK・クラッシュレポーターの類は無い (`./gradlew :app:dependencies` で確認できる)
 - 写真が渡る先は、ユーザーが選んだ共有先 (= GroupPins の PWA) だけ。
   端末外への送信はその共有先のアプリが行う
 - 共有シートを出さずに写真を直接渡す経路 (経路 0) では、渡す相手が **Chrome の WebAPK
@@ -22,6 +23,33 @@ UI なしミニアプリ。
   (`PhotoBridge.WEBAPK_SIGNER_CERT_SHA256`)。`org.chromium.webapk.*` というパッケージ名と
   meta-data は誰でも名乗れるため、名前だけを信じて写真を渡さない。
   検証に通らなければ写真は渡さず、座標のみの URL 経路へ落ちる
+
+## 自分で確かめる
+
+ビルドした APK の権限一覧はソースを信じなくても直接見られる。
+
+```bash
+./gradlew assembleDebug
+$ANDROID_HOME/build-tools/35.0.0/aapt2 dump permissions \
+  app/build/outputs/apk/debug/app-debug.apk
+```
+
+出力は以下がすべてで、`android.permission.INTERNET` は現れない。
+
+```
+package: com.grouppins.photobridge
+uses-permission: name='android.permission.ACCESS_MEDIA_LOCATION'
+uses-permission: name='android.permission.READ_MEDIA_IMAGES'
+uses-permission: name='android.permission.READ_MEDIA_VISUAL_USER_SELECTED'
+uses-permission: name='android.permission.READ_EXTERNAL_STORAGE' maxSdkVersion='32'
+permission: com.grouppins.photobridge.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+uses-permission: name='com.grouppins.photobridge.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
+```
+
+末尾 2 行はソースの AndroidManifest.xml には無く、`androidx.core` の manifest から
+マージされる。自アプリが動的登録するレシーバーを非公開にするための
+**自アプリ名前空間の signature レベル権限**で、他アプリや OS の機能への
+アクセス権ではない。
 
 ## なぜ必要か
 
@@ -64,13 +92,42 @@ URL パラメータで PWA へ渡すのがこのアプリの役割。
 
 ## ビルドとインストール
 
-Android Studio でこのディレクトリを開いて `app` を実行 (端末を USB 接続)、または:
+Android Studio でこのディレクトリを開いて `app` を実行 (端末を USB 接続)、または以下。
+
+### 環境構築 (Ubuntu / WSL2。初回のみ)
 
 ```bash
-gradle wrapper            # 初回のみ (wrapper はコミットしていない)
-./gradlew assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jdk-headless unzip curl
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+export ANDROID_HOME=$HOME/Android/Sdk
+mkdir -p $ANDROID_HOME/cmdline-tools
+curl -sSLo /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools
+mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+yes | sdkmanager --licenses
+sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+curl -sSLo /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+unzip -q /tmp/gradle.zip -d $HOME/tools
+export PATH=$HOME/tools/gradle-8.7/bin:$PATH
+```
+
+`JAVA_HOME` / `ANDROID_HOME` / `PATH` の 4 行は毎回のシェルで必要なので
+`~/.bashrc` に入れておく。
+
+### ビルド
+
+```bash
+gradle wrapper --gradle-version 8.7
+./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+wrapper はコミットしていないので `gradle wrapper` は初回のみ。
+APK は `app/build/outputs/apk/debug/app-debug.apk` に出る。
 
 `-r` は更新インストール用 (インストール済み端末で `-r` なしだと
 `INSTALL_FAILED_ALREADY_EXISTS` で失敗する。初回インストールでも付けて問題ない)。
