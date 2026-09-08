@@ -123,7 +123,7 @@ CI は APK を公開する前に、署名が有効であることと `INTERNET` 
 ```bash
 keytool -genkeypair -v -keystore release.jks -alias release \
   -keyalg RSA -keysize 2048 -validity 10000
-gh secret set KEYSTORE_BASE64 < <(base64 -w0 release.jks)
+base64 -w0 release.jks | gh secret set KEYSTORE_BASE64
 gh secret set KEYSTORE_PASSWORD
 gh secret set KEY_ALIAS
 gh secret set KEY_PASSWORD
