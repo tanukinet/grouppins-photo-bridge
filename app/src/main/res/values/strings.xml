@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GroupPins 写真取込</string>
+    <string name="err_no_image">写真を受け取れませんでした</string>
+    <string name="err_no_permission">位置情報の権限が許可されませんでした</string>
+    <string name="err_no_permission_settings">位置情報の権限が拒否されています。アプリ情報の権限画面で「メディアの位置情報」を許可してください</string>
+    <string name="err_no_gps">写真に位置情報がありません (元写真に GPS が無いか、クラウドのみの写真です)</string>
+    <string name="err_cloud_timeout">クラウドのみの写真のため読み込めませんでした (端末に保存してから選んでください)</string>
+    <string name="err_no_browser">ブラウザを起動できませんでした</string>
+    <string name="msg_loading">写真を読み込んでいます…</string>
+    <string name="share_chooser_title">GroupPins へ送る (共有先で GroupPins を選択)</string>
+    <string name="bucket_no_folder">(フォルダーなし)</string>
+    <string name="msg_partial_load">%1$d 枚中 %2$d 枚を読み込みました (GPS のない写真・読み取れない写真・クラウドのみの写真・上限超過分は除外)</string>
+</resources>
