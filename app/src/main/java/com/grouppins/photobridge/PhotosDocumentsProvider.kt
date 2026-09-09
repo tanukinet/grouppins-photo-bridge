@@ -14,6 +14,7 @@ import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
 import android.provider.MediaStore
+import android.util.Log
 import android.util.Size
 import java.io.File
 import java.io.FileNotFoundException
@@ -22,6 +23,7 @@ import java.io.IOException
 class PhotosDocumentsProvider : DocumentsProvider() {
 
     companion object {
+        private const val TAG = "PhotosDocumentsProvider"
         private const val ROOT_ID = "grouppins-photos"
         private const val ROOT_DOC_ID = "root"
         private const val DOC_PREFIX = "img:"
@@ -129,7 +131,7 @@ class PhotosDocumentsProvider : DocumentsProvider() {
     ): Cursor {
         val result = MatrixCursor(projection ?: DOC_PROJECTION)
         if (parentDocumentId == ROOT_DOC_ID) {
-            loadBuckets().forEach { addBucketRow(result, it) }
+            sortBuckets(loadBuckets(), sortOrder).forEach { addBucketRow(result, it) }
             return result
         }
         if (parentDocumentId.startsWith(BUCKET_PREFIX)) {
@@ -178,6 +180,18 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         return buckets
     }
 
+    private fun sortBuckets(buckets: List<BucketEntry>, sortOrder: String?): List<BucketEntry> {
+        if (sortOrder.isNullOrBlank()) return buckets
+        val desc = sortOrder.contains("DESC", ignoreCase = true)
+        val comparator: Comparator<BucketEntry> = when {
+            sortOrder.contains(Document.COLUMN_DISPLAY_NAME) ->
+                compareBy(String.CASE_INSENSITIVE_ORDER) { it.name ?: "" }
+            sortOrder.contains(Document.COLUMN_LAST_MODIFIED) -> compareBy { it.lastModifiedSec }
+            else -> return buckets
+        }
+        return buckets.sortedWith(if (desc) comparator.reversed() else comparator)
+    }
+
     private fun translateSortOrder(sortOrder: String?): String {
         val default = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
         if (sortOrder.isNullOrBlank()) return default
@@ -200,14 +214,18 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         signal: CancellationSignal?,
     ): ParcelFileDescriptor {
         if (mode != "r") throw FileNotFoundException("read-only provider (mode=$mode)")
-        val uri = mediaUri(documentId)
-        val resolver = context!!.contentResolver
+        val original = MediaStore.setRequireOriginal(mediaUri(documentId))
         try {
-            resolver.openFileDescriptor(MediaStore.setRequireOriginal(uri), "r", signal)?.let { return it }
-        } catch (_: Exception) {
+            return context!!.contentResolver.openFileDescriptor(original, "r", signal)
+                ?: throw FileNotFoundException(documentId)
+        } catch (e: FileNotFoundException) {
+            throw e
+        } catch (e: OperationCanceledException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "original (with GPS) unavailable for $documentId; not falling back to a stripped copy", e)
+            throw FileNotFoundException("original unavailable for $documentId (${e.javaClass.simpleName}: ${e.message})")
         }
-        return resolver.openFileDescriptor(uri, "r", signal)
-            ?: throw FileNotFoundException(documentId)
     }
 
     override fun openDocumentThumbnail(
@@ -229,7 +247,8 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         try {
             val file = File.createTempFile("thumb", ".jpg", context!!.cacheDir)
             try {
-                file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+                val written = file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+                if (!written) throw FileNotFoundException("thumbnail encode failed: $documentId")
                 val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
                 return AssetFileDescriptor(pfd, 0, AssetFileDescriptor.UNKNOWN_LENGTH)
             } finally {
@@ -258,16 +277,13 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         projection: Array<String> = MEDIA_PROJECTION,
         block: (Cursor) -> Unit,
     ) {
-        try {
-            context!!.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                args,
-                sortOrder,
-            )?.use(block)
-        } catch (_: SecurityException) {
-        }
+        context!!.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            args,
+            sortOrder,
+        )?.use(block)
     }
 
     private fun addImageRow(result: MatrixCursor, cursor: Cursor) {
