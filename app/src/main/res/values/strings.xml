@@ -10,6 +10,8 @@
     <string name="err_original_unavailable">GPS 付きの元写真を開けませんでした (写真へのアクセスが「一部のみ」になっていないか確認してください)</string>
     <string name="err_no_browser">ブラウザを起動できませんでした</string>
     <string name="err_launch_failed">送り先のアプリを起動できませんでした</string>
+    <string name="err_interrupted">写真の処理が 2 回続けて中断されました (端末のメモリ不足の可能性があります。枚数を減らして試してください)</string>
+    <string name="err_no_picker">写真を選ぶ画面を開けませんでした (ファイル選択アプリが無効になっていないか確認してください)</string>
     <string name="err_uri_not_granted">共有元のアプリから写真の読み取り許可が渡されていません</string>
     <string name="msg_loading">写真を読み込んでいます…</string>
     <string name="share_chooser_title">GroupPins へ送る (共有先で GroupPins を選択)</string>

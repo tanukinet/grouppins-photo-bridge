@@ -1,8 +1,11 @@
 package com.grouppins.photobridge
 
+import android.Manifest
 import android.content.ContentResolver
 import android.content.ContentUris
+import android.content.pm.PackageManager
 import android.content.res.AssetFileDescriptor
+import android.database.ContentObserver
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.graphics.Bitmap
@@ -11,8 +14,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
@@ -28,6 +34,7 @@ class PhotosDocumentsProvider : DocumentsProvider() {
 
     companion object {
         private const val TAG = "PhotosDocumentsProvider"
+        private const val AUTHORITY = "com.grouppins.photobridge.documents"
         private const val ROOT_ID = "grouppins-photos"
         private const val ROOT_DOC_ID = "root"
         private const val DOC_PREFIX = "img:"
@@ -69,15 +76,33 @@ class PhotosDocumentsProvider : DocumentsProvider() {
             MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
             MediaStore.Images.Media.DATE_MODIFIED,
         )
+
+        private val CHILDREN_URI: Uri = DocumentsContract.buildChildDocumentsUri(AUTHORITY, ROOT_DOC_ID)
+
+        private val BUCKET_SORT_COLUMNS = setOf(Document.COLUMN_DISPLAY_NAME, Document.COLUMN_LAST_MODIFIED)
+        private val IMAGE_SORT_COLUMNS = BUCKET_SORT_COLUMNS + Document.COLUMN_SIZE
     }
 
     private data class BucketEntry(val bucketId: Long, val name: String?, val lastModifiedSec: Long)
 
+    private data class BucketCacheKey(val generation: Long?, val mediaAccess: Int)
+
     private var bucketCache: List<BucketEntry>? = null
     private var bucketCacheAt = 0L
-    private var bucketCacheGeneration: Long? = null
+    private var bucketCacheKey: BucketCacheKey? = null
 
-    override fun onCreate(): Boolean = true
+    private val mediaObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            context?.contentResolver?.notifyChange(CHILDREN_URI, null)
+        }
+    }
+
+    override fun onCreate(): Boolean {
+        context!!.contentResolver.registerContentObserver(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, mediaObserver,
+        )
+        return true
+    }
 
     override fun queryRoots(projection: Array<out String>?): Cursor {
         val result = MatrixCursor(projection ?: ROOT_PROJECTION)
@@ -94,6 +119,7 @@ class PhotosDocumentsProvider : DocumentsProvider() {
 
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         val result = MatrixCursor(projection ?: DOC_PROJECTION)
+        if (documentId != ROOT_DOC_ID) requireMediaAccess()
         if (documentId == ROOT_DOC_ID) {
             result.newRow().apply {
                 add(Document.COLUMN_DOCUMENT_ID, ROOT_DOC_ID)
@@ -132,9 +158,58 @@ class PhotosDocumentsProvider : DocumentsProvider() {
     override fun queryChildDocuments(
         parentDocumentId: String,
         projection: Array<out String>?,
-        sortOrder: String?,
+        queryArgs: Bundle?,
     ): Cursor {
+        val rawSortOrder = queryArgs?.getString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER)
+        val requested = if (rawSortOrder == null) requestedSort(queryArgs) else null
+        val sortOrder = rawSortOrder ?: requested?.let { "${it.column} ${if (it.desc) "DESC" else "ASC"}" }
+        val result = queryChildren(parentDocumentId, projection, sortOrder)
+        if (requested != null && requested.column in sortableColumns(parentDocumentId)) {
+            result.extras = Bundle().apply {
+                putStringArray(
+                    ContentResolver.EXTRA_HONORED_ARGS,
+                    arrayOf(ContentResolver.QUERY_ARG_SORT_COLUMNS, ContentResolver.QUERY_ARG_SORT_DIRECTION),
+                )
+                putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(requested.column))
+                putInt(
+                    ContentResolver.QUERY_ARG_SORT_DIRECTION,
+                    if (requested.desc) {
+                        ContentResolver.QUERY_SORT_DIRECTION_DESCENDING
+                    } else {
+                        ContentResolver.QUERY_SORT_DIRECTION_ASCENDING
+                    },
+                )
+            }
+        }
+        return result
+    }
+
+    override fun queryChildDocuments(
+        parentDocumentId: String,
+        projection: Array<out String>?,
+        sortOrder: String?,
+    ): Cursor = queryChildren(parentDocumentId, projection, sortOrder)
+
+    private fun requestedSort(queryArgs: Bundle?): SortSpec? {
+        if (queryArgs == null || queryArgs.containsKey(ContentResolver.QUERY_ARG_SORT_COLLATION)) return null
+        val column = queryArgs.getStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS)?.singleOrNull() ?: return null
+        val direction = queryArgs.getInt(
+            ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_ASCENDING,
+        )
+        return SortSpec(column, direction == ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+    }
+
+    private fun sortableColumns(parentDocumentId: String): Set<String> =
+        if (parentDocumentId == ROOT_DOC_ID) BUCKET_SORT_COLUMNS else IMAGE_SORT_COLUMNS
+
+    private fun queryChildren(
+        parentDocumentId: String,
+        projection: Array<out String>?,
+        sortOrder: String?,
+    ): MatrixCursor {
+        requireMediaAccess()
         val result = MatrixCursor(projection ?: DOC_PROJECTION)
+        result.setNotificationUri(context!!.contentResolver, CHILDREN_URI)
         if (parentDocumentId == ROOT_DOC_ID) {
             sortBuckets(loadBuckets(), sortOrder).forEach { addBucketRow(result, it) }
             return result
@@ -157,25 +232,58 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         throw FileNotFoundException(parentDocumentId)
     }
 
+    private fun granted(permission: String): Boolean =
+        context!!.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
+    @Suppress("DEPRECATION")
+    private fun hasMediaAccess(): Boolean = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+            granted(Manifest.permission.READ_MEDIA_IMAGES) ||
+                granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> granted(Manifest.permission.READ_MEDIA_IMAGES)
+        else -> granted(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+
+    private fun requireMediaAccess() {
+        if (!hasMediaAccess()) {
+            throw SecurityException("photo access has not been granted to ${context!!.packageName}; launch the app once to grant it")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun mediaAccessState(): Int {
+        var state = 0
+        if (granted(Manifest.permission.ACCESS_MEDIA_LOCATION)) state = state or 1
+        val read = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (granted(read)) state = state or 2
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+        ) {
+            state = state or 4
+        }
+        return state
+    }
+
     private fun loadBuckets(): List<BucketEntry> {
-        val generation = mediaGeneration()
+        val key = BucketCacheKey(mediaGeneration(), mediaAccessState())
         synchronized(this) {
             bucketCache?.let {
-                val fresh = if (generation != null) {
-                    generation == bucketCacheGeneration
-                } else {
-                    System.currentTimeMillis() - bucketCacheAt < BUCKET_CACHE_TTL_MS
-                }
+                val fresh = key == bucketCacheKey &&
+                    (key.generation != null || System.currentTimeMillis() - bucketCacheAt < BUCKET_CACHE_TTL_MS)
                 if (fresh) return it
             }
+            val buckets = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) groupedBuckets() else scannedBuckets()
+            if (buckets.isNotEmpty()) {
+                bucketCache = buckets
+                bucketCacheAt = System.currentTimeMillis()
+                bucketCacheKey = key
+            }
+            return buckets
         }
-        val buckets = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) groupedBuckets() else scannedBuckets()
-        synchronized(this) {
-            bucketCache = buckets
-            bucketCacheAt = System.currentTimeMillis()
-            bucketCacheGeneration = generation
-        }
-        return buckets
     }
 
     private fun mediaGeneration(): Long? {
@@ -195,12 +303,13 @@ class PhotosDocumentsProvider : DocumentsProvider() {
             putInt(ContentResolver.QUERY_ARG_LIMIT, MAX_ITEMS)
         }
         val names = LinkedHashMap<Long, String?>()
-        context!!.contentResolver.query(
+        val cursor = context!!.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             arrayOf(MediaStore.Images.Media.BUCKET_ID, MediaStore.Images.Media.BUCKET_DISPLAY_NAME),
             args,
             null,
-        )?.use { cursor ->
+        ) ?: throw FileNotFoundException("MediaStore returned no cursor for the folder list")
+        cursor.use {
             val idIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
             val nameIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
             while (cursor.moveToNext()) names[cursor.getLong(idIdx)] = cursor.getString(nameIdx)
@@ -218,12 +327,13 @@ class PhotosDocumentsProvider : DocumentsProvider() {
             putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "${MediaStore.Images.Media.DATE_MODIFIED} DESC")
             putInt(ContentResolver.QUERY_ARG_LIMIT, 1)
         }
-        context!!.contentResolver.query(
+        val cursor = context!!.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             arrayOf(MediaStore.Images.Media.DATE_MODIFIED),
             args,
             null,
-        )?.use { cursor -> if (cursor.moveToNext()) return cursor.getLong(0) }
+        ) ?: throw FileNotFoundException("MediaStore returned no cursor for bucket $bucketId")
+        cursor.use { if (it.moveToNext()) return it.getLong(0) }
         return 0L
     }
 
@@ -249,7 +359,8 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         val first = sortOrder?.substringBefore(',')?.trim().orEmpty()
         if (first.isEmpty()) return null
         val parts = first.split(Regex("\\s+"))
-        return SortSpec(parts[0], parts.getOrNull(1).equals("DESC", ignoreCase = true))
+        val desc = parts.size > 1 && parts.last().equals("DESC", ignoreCase = true)
+        return SortSpec(parts[0], desc)
     }
 
     private fun sortBuckets(buckets: List<BucketEntry>, sortOrder: String?): List<BucketEntry> {
@@ -346,13 +457,14 @@ class PhotosDocumentsProvider : DocumentsProvider() {
         projection: Array<String> = MEDIA_PROJECTION,
         block: (Cursor) -> Unit,
     ) {
-        context!!.contentResolver.query(
+        val cursor = context!!.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             projection,
             selection,
             args,
             sortOrder,
-        )?.use(block)
+        ) ?: throw FileNotFoundException("MediaStore returned no cursor")
+        cursor.use(block)
     }
 
     private fun addImageRow(result: MatrixCursor, cursor: Cursor) {

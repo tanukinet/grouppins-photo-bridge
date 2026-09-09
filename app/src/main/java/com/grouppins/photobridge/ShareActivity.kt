@@ -1,5 +1,6 @@
 package com.grouppins.photobridge
 
+import android.Manifest
 import android.content.ContentResolver
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,10 +16,16 @@ class ShareActivity : BridgeActivity() {
         if (grantedUris() != null) proceedWithPermissions()
     }
 
+    override fun requiredPermissions(): List<String> = listOf(Manifest.permission.ACCESS_MEDIA_LOCATION)
+
+    override fun alsoRequestedPermissions(): List<String> = emptyList()
+
     override fun onPermissionsReady() {
         val uris = grantedUris() ?: return
-        PhotoBridge.extractAndOpenAllAsync(this, uris, ::deliver)
+        startProcessing(uris)
     }
+
+    override fun process(uris: List<Uri>) = PhotoBridge.extractAndOpenAllAsync(this, uris, ::deliver)
 
     private fun grantedUris(): List<Uri>? {
         validated?.let { return it }

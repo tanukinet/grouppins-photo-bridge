@@ -3,14 +3,16 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val keystorePath: String? = System.getenv("KEYSTORE_PATH")
+val signingEnv = listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
+val missingSigningEnv = signingEnv.filter { System.getenv(it).isNullOrEmpty() }
+val keystorePath: String? = System.getenv("KEYSTORE_PATH")?.takeIf { missingSigningEnv.isEmpty() }
 
 gradle.taskGraph.whenReady {
     val packagesRelease = allTasks.any { it.path.matches(Regex(""":app:package\w*Release(Bundle)?""")) }
-    if (keystorePath == null && packagesRelease) {
+    if (missingSigningEnv.isNotEmpty() && packagesRelease) {
         throw GradleException(
-            "release ビルドには署名鍵が必要です。KEYSTORE_PATH / KEYSTORE_PASSWORD / " +
-                "KEY_ALIAS / KEY_PASSWORD を設定してください (未署名の APK は配布しない)",
+            "release ビルドには署名鍵が必要です。未設定: ${missingSigningEnv.joinToString(" / ")} " +
+                "(KEYSTORE_PATH / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD を全て設定してください。未署名の APK は配布しない)",
         )
     }
 }

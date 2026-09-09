@@ -11,5 +11,5 @@ class PickActivity : BridgeActivity() {
 
     override fun onPermissionsReady() = launchPicker()
 
-    override fun onPhotosPicked(uris: List<Uri>) = PhotoBridge.deliverAsync(this, uris, ::deliver)
+    override fun process(uris: List<Uri>) = PhotoBridge.deliverAsync(this, uris, ::deliver)
 }

@@ -14,9 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           distribution: temurin
           java-version: "17"
@@ -42,8 +44,8 @@ jobs:
               exit 1
             fi
             MAJOR=${BASH_REMATCH[1]}; MINOR=${BASH_REMATCH[2]}; PATCH=${BASH_REMATCH[3]}
-            if [ "$((10#$MAJOR))" -gt 2099 ]; then
-              echo "versionCode に収めるため X は 2099 以下にしてください (受け取った値: $GITHUB_REF_NAME)" >&2
+            if [ "$((10#$MAJOR))" -lt 1 ] || [ "$((10#$MAJOR))" -gt 2099 ]; then
+              echo "X は 1 以上 2099 以下にしてください (0 だと dev ビルドの versionCode を下回る、2100 以上は versionCode に収まらない。受け取った値: $GITHUB_REF_NAME)" >&2
               exit 1
             fi
             VERSION_CODE=$((10#$MAJOR * 1000000 + 10#$MINOR * 1000 + 10#$PATCH))
@@ -57,11 +59,16 @@ jobs:
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "secrets.KEYSTORE_BASE64 が未設定です" >&2
-            exit 1
-          fi
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "secrets.$name が未設定です (署名に必要な 4 つを全て登録してください)" >&2
+              exit 1
+            fi
+          done
           printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
 
       - name: Build release APK
@@ -71,6 +78,10 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
 
       - name: Verify APK
         env:
@@ -115,7 +126,7 @@ jobs:
           echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: apk-${{ env.VERSION_NAME }}
           path: |
