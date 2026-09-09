@@ -10,6 +10,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
+import android.os.Build
 import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
@@ -25,6 +26,7 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -37,7 +39,7 @@ object PhotoBridge {
 
     private const val TARGET_URL = "https://grouppins.com/"
 
-    private const val MAX_PHOTOS = 50
+    internal const val MAX_PHOTOS = 50
 
     private const val OPEN_TIMEOUT_MS = 5_000L
     private const val OPEN_TIMEOUT_MIN_MS = 1_000L
@@ -63,46 +65,65 @@ object PhotoBridge {
     internal class ExtractStats {
         var timedOut = 0
             private set
-        private val timedOutUris = mutableSetOf<Uri>()
+        var originalUnavailable = 0
+            private set
+        private val failedUris = mutableSetOf<Uri>()
         private var budgetMs = OPEN_TIMEOUT_BUDGET_MS
 
         fun openTimeoutMs(uri: Uri): Long? {
-            if (uri in timedOutUris) return null
+            if (uri in failedUris) return null
             return maxOf(OPEN_TIMEOUT_MIN_MS, minOf(OPEN_TIMEOUT_MS, budgetMs))
         }
 
         fun recordTimeout(uri: Uri, waitedMs: Long) {
             timedOut++
-            timedOutUris += uri
+            failedUris += uri
             budgetMs -= waitedMs
+        }
+
+        fun recordOriginalUnavailable(uri: Uri) {
+            originalUnavailable++
+            failedUris += uri
+        }
+
+        fun recordOpenFailure(uri: Uri) {
+            failedUris += uri
         }
     }
 
     internal fun openPreferOriginal(activity: Activity, uri: Uri, stats: ExtractStats): InputStream? {
+        val timeoutMs = stats.openTimeoutMs(uri) ?: return null
         val mediaUri: Uri? = try {
             if (uri.authority == MediaStore.AUTHORITY) uri else MediaStore.getMediaUri(activity, uri)
         } catch (_: Exception) {
             null
         }
-        if (mediaUri != null) {
-            try {
-                activity.contentResolver.openInputStream(MediaStore.setRequireOriginal(mediaUri))?.let { return it }
-            } catch (_: Exception) {
-            }
-        }
-        val timeoutMs = stats.openTimeoutMs(uri) ?: return null
+        val target = if (mediaUri != null) MediaStore.setRequireOriginal(mediaUri) else uri
         val signal = CancellationSignal()
         val handler = Handler(Looper.getMainLooper())
         val cancel = Runnable { signal.cancel() }
         val startedAt = SystemClock.elapsedRealtime()
         handler.postDelayed(cancel, timeoutMs)
         return try {
-            val pfd = activity.contentResolver.openFileDescriptor(uri, "r", signal)
-            pfd?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
+            val pfd = activity.contentResolver.openFileDescriptor(target, "r", signal)
+            if (pfd == null) {
+                Log.w(TAG, "no descriptor for $target")
+                if (mediaUri != null) stats.recordOriginalUnavailable(uri) else stats.recordOpenFailure(uri)
+                null
+            } else {
+                ParcelFileDescriptor.AutoCloseInputStream(pfd)
+            }
         } catch (_: OperationCanceledException) {
             stats.recordTimeout(uri, SystemClock.elapsedRealtime() - startedAt)
             null
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (mediaUri != null) {
+                Log.w(TAG, "original (with GPS) unavailable for $uri; not falling back to a stripped copy", e)
+                stats.recordOriginalUnavailable(uri)
+            } else {
+                Log.w(TAG, "could not open $uri", e)
+                stats.recordOpenFailure(uri)
+            }
             null
         } finally {
             handler.removeCallbacks(cancel)
@@ -152,12 +173,19 @@ object PhotoBridge {
             val file = try {
                 downscaleWithExif(activity, uri, dir, i, stats) ?: copyRaw(activity, uri, dir, i, stats)
             } catch (e: Exception) {
-                Log.w(TAG, "could not prepare $uri for sharing", e)
+                logSkipped(uri, e)
+                null
+            } catch (e: OutOfMemoryError) {
+                logSkipped(uri, e)
                 null
             } ?: return@forEachIndexed
             out.add(FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file))
         }
         return out
+    }
+
+    private fun logSkipped(uri: Uri, cause: Throwable) {
+        Log.w(TAG, "could not prepare $uri for sharing", cause)
     }
 
     private fun newCacheFile(dir: File, index: Int, ext: String): File =
@@ -195,7 +223,7 @@ object PhotoBridge {
     }
 
     private fun downscaleWithExif(activity: Activity, uri: Uri, dir: File, index: Int, stats: ExtractStats): File? {
-        val exif = readExif(activity, uri, stats) ?: return null
+        val exif = readExif(activity, uri, stats) ?: throw IOException("EXIF unreadable")
         val latLong: DoubleArray? = exif.latLong
         val takenAt = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
             ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
@@ -203,7 +231,7 @@ object PhotoBridge {
             exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        val boundsStream = openPreferOriginal(activity, uri, stats) ?: return null
+        val boundsStream = openPreferOriginal(activity, uri, stats) ?: throw IOException("could not reopen for bounds")
         boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sample = 1
@@ -212,8 +240,8 @@ object PhotoBridge {
         }
 
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val decoded = openPreferOriginal(activity, uri, stats)?.use { BitmapFactory.decodeStream(it, null, opts) }
-            ?: return null
+        val decodeStream = openPreferOriginal(activity, uri, stats) ?: throw IOException("could not reopen for decode")
+        val decoded = decodeStream.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
         val scale = minOf(1f, SHARE_MAX_DIM.toFloat() / maxOf(decoded.width, decoded.height))
         val needsTransform = orientation != ExifInterface.ORIENTATION_NORMAL &&
             orientation != ExifInterface.ORIENTATION_UNDEFINED
@@ -239,23 +267,28 @@ object PhotoBridge {
             }
         }
         val keepAlpha = decoded.hasAlpha()
-        val finalBitmap = if (scale < 1f || needsTransform) {
-            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
-        } else {
-            decoded
-        }
         val file = newCacheFile(dir, index, if (keepAlpha) "png" else "jpg")
         val format = if (keepAlpha) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
         val written = try {
-            file.outputStream().use { finalBitmap.compress(format, SHARE_JPEG_QUALITY, it) }
+            val finalBitmap = if (scale < 1f || needsTransform) {
+                Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            } else {
+                decoded
+            }
+            try {
+                file.outputStream().use { finalBitmap.compress(format, SHARE_JPEG_QUALITY, it) }
+            } finally {
+                if (finalBitmap !== decoded) finalBitmap.recycle()
+            }
+        } catch (t: Throwable) {
+            file.delete()
+            throw t
         } finally {
-            if (finalBitmap !== decoded) finalBitmap.recycle()
             decoded.recycle()
         }
         if (!written) {
-            Log.w(TAG, "bitmap encode failed: $uri")
             file.delete()
-            return null
+            throw IOException("bitmap encode failed")
         }
 
         if (latLong != null || takenAt != null) {
@@ -268,9 +301,8 @@ object PhotoBridge {
                 }
                 out.saveAttributes()
             } catch (e: Exception) {
-                Log.w(TAG, "EXIF write failed: $uri", e)
                 file.delete()
-                return null
+                throw IOException("EXIF write failed", e)
             }
         }
         return file
@@ -326,9 +358,9 @@ object PhotoBridge {
         }
     }
 
-    internal fun findWebApkShareActivity(activity: Activity, action: String): ComponentName? {
+    internal fun findWebApkShareActivity(activity: Activity, action: String, type: String): ComponentName? {
         val host = Uri.parse(TARGET_URL).host ?: return null
-        val probe = Intent(action).setType("image/jpeg")
+        val probe = Intent(action).setType(type)
         val candidates = try {
             activity.packageManager.queryIntentActivities(probe, 0)
         } catch (_: Exception) {
@@ -357,6 +389,10 @@ object PhotoBridge {
         return null
     }
 
+    private fun hasWebApkShareTarget(activity: Activity): Boolean =
+        findWebApkShareActivity(activity, Intent.ACTION_SEND, "image/*") != null ||
+            findWebApkShareActivity(activity, Intent.ACTION_SEND_MULTIPLE, "image/*") != null
+
     private fun runAsync(activity: Activity, onDone: (Outcome) -> Unit, work: () -> Outcome) {
         Toast.makeText(activity, R.string.msg_loading, Toast.LENGTH_SHORT).show()
         Thread {
@@ -381,6 +417,12 @@ object PhotoBridge {
         }
     }
 
+    private fun emptyBatchError(stats: ExtractStats): Int = when {
+        stats.originalUnavailable > 0 -> R.string.err_original_unavailable
+        stats.timedOut > 0 -> R.string.err_cloud_timeout
+        else -> R.string.err_no_image
+    }
+
     fun launch(activity: Activity, intent: Intent, failureRes: Int): Int? {
         return try {
             activity.startActivity(intent)
@@ -392,17 +434,21 @@ object PhotoBridge {
     }
 
     fun deliverAsync(activity: Activity, uris: List<Uri>, onDone: (Outcome) -> Unit) = runAsync(activity, onDone) {
-        val action = shareAction(minOf(uris.size, MAX_PHOTOS))
-        val component = findWebApkShareActivity(activity, action)
-        if (component != null) {
+        if (hasWebApkShareTarget(activity)) {
             val stats = ExtractStats()
             val shared = copyOriginalsToCache(activity, uris, stats)
             if (shared.isNotEmpty()) {
-                notifyPartial(activity, uris.size, shared.size)
-                val send = buildShareIntent(activity, shared, action).setComponent(component)
-                return@runAsync Outcome.Launch(send, R.string.err_launch_failed)
+                val action = shareAction(shared.size)
+                val send = buildShareIntent(activity, shared, action)
+                val component = findWebApkShareActivity(activity, action, send.type ?: "image/*")
+                if (component != null) {
+                    notifyPartial(activity, uris.size, shared.size)
+                    return@runAsync Outcome.Launch(send.setComponent(component), R.string.err_launch_failed)
+                }
+                Log.w(TAG, "WebAPK does not accept $action ${send.type}; falling back to the coordinates-only URL")
+            } else if (stats.timedOut > 0 || stats.originalUnavailable > 0) {
+                return@runAsync Outcome.Error(emptyBatchError(stats))
             }
-            if (stats.timedOut > 0) return@runAsync Outcome.Error(R.string.err_cloud_timeout)
         }
         extractAndOpenAll(activity, uris)
     }
@@ -410,9 +456,7 @@ object PhotoBridge {
     fun shareSheetAsync(activity: Activity, uris: List<Uri>, onDone: (Outcome) -> Unit) = runAsync(activity, onDone) {
         val stats = ExtractStats()
         val shared = copyOriginalsToCache(activity, uris, stats)
-        if (shared.isEmpty()) {
-            return@runAsync Outcome.Error(if (stats.timedOut > 0) R.string.err_cloud_timeout else R.string.err_no_image)
-        }
+        if (shared.isEmpty()) return@runAsync Outcome.Error(emptyBatchError(stats))
         notifyPartial(activity, uris.size, shared.size)
         val send = buildShareIntent(activity, shared, shareAction(shared.size))
         Outcome.Launch(
@@ -424,24 +468,33 @@ object PhotoBridge {
     fun extractAndOpenAllAsync(activity: Activity, uris: List<Uri>, onDone: (Outcome) -> Unit) =
         runAsync(activity, onDone) { extractAndOpenAll(activity, uris) }
 
-    fun onPermissionDenied(activity: Activity): Int {
-        if (activity.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_MEDIA_LOCATION)) {
+    fun onPermissionDenied(activity: Activity, denied: List<String>): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            Manifest.permission.READ_MEDIA_IMAGES in denied &&
+            activity.checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return R.string.err_partial_media
+        }
+        if (denied.any { activity.shouldShowRequestPermissionRationale(it) }) {
             return R.string.err_no_permission
         }
         val settings = Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.fromParts("package", activity.packageName, null),
         )
-        launch(activity, settings, R.string.err_no_permission_settings)
-        return R.string.err_no_permission_settings
+        return if (launch(activity, settings, R.string.err_no_permission) == null) {
+            R.string.err_no_permission_settings
+        } else {
+            R.string.err_no_permission
+        }
     }
 
     private fun openUrl(url: Uri): Outcome =
         Outcome.Launch(Intent(Intent.ACTION_VIEW, url), R.string.err_no_browser)
 
     private fun extractAndOpen(activity: Activity, uri: Uri, stats: ExtractStats): Outcome {
-        val meta = extract(activity, uri, stats)
-            ?: return Outcome.Error(if (stats.timedOut > 0) R.string.err_cloud_timeout else R.string.err_no_image)
+        val meta = extract(activity, uri, stats) ?: return Outcome.Error(emptyBatchError(stats))
         if (meta.lat == null || meta.lng == null) {
             return Outcome.Error(R.string.err_no_gps)
         }
@@ -456,21 +509,10 @@ object PhotoBridge {
     private fun extractAndOpenAll(activity: Activity, uris: List<Uri>): Outcome {
         val stats = ExtractStats()
         if (uris.size == 1) return extractAndOpen(activity, uris[0], stats)
-        var readableCount = 0
-        val metas = uris.asSequence()
-            .mapNotNull { extract(activity, it, stats) }
-            .onEach { readableCount++ }
-            .filter { it.lat != null && it.lng != null }
-            .take(MAX_PHOTOS)
-            .toList()
+        val readable = uris.take(MAX_PHOTOS).mapNotNull { extract(activity, it, stats) }
+        val metas = readable.filter { it.lat != null && it.lng != null }
         if (metas.isEmpty()) {
-            return Outcome.Error(
-                when {
-                    readableCount > 0 -> R.string.err_no_gps
-                    stats.timedOut > 0 -> R.string.err_cloud_timeout
-                    else -> R.string.err_no_image
-                }
-            )
+            return Outcome.Error(if (readable.isNotEmpty()) R.string.err_no_gps else emptyBatchError(stats))
         }
         notifyPartial(activity, uris.size, metas.size)
         val batch = metas.joinToString(";") { m ->

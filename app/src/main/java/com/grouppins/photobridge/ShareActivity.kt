@@ -9,8 +9,10 @@ import android.os.Process
 
 class ShareActivity : BridgeActivity() {
 
+    private var validated: List<Uri>? = null
+
     override fun onFirstCreate() {
-        if (grantedUris() != null) proceedWithPermissions(missingMediaLocation())
+        if (grantedUris() != null) proceedWithPermissions()
     }
 
     override fun onPermissionsReady() {
@@ -19,17 +21,19 @@ class ShareActivity : BridgeActivity() {
     }
 
     private fun grantedUris(): List<Uri>? {
+        validated?.let { return it }
         val uris = receivedUris()
+        val checked = uris.take(PhotoBridge.MAX_PHOTOS)
         return when {
-            uris.isEmpty() -> {
+            checked.isEmpty() -> {
                 fail(R.string.err_no_image)
                 null
             }
-            uris.any { !isGrantedToThisApp(it) } -> {
+            checked.any { !isGrantedToThisApp(it) } -> {
                 fail(R.string.err_uri_not_granted)
                 null
             }
-            else -> uris
+            else -> uris.also { validated = it }
         }
     }
 

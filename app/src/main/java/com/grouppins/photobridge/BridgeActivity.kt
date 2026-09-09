@@ -32,6 +32,10 @@ abstract class BridgeActivity : Activity() {
 
     protected abstract fun onFirstCreate()
 
+    protected open fun requiredPermissions(): List<String> = listOf(Manifest.permission.ACCESS_MEDIA_LOCATION)
+
+    protected open fun alsoRequestedPermissions(): List<String> = emptyList()
+
     protected abstract fun onPermissionsReady()
 
     protected open fun onPhotosPicked(uris: List<Uri>): Unit =
@@ -56,18 +60,16 @@ abstract class BridgeActivity : Activity() {
         super.onPause()
     }
 
-    protected fun granted(permission: String): Boolean =
+    private fun granted(permission: String): Boolean =
         checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
-    protected fun missingMediaLocation(): List<String> =
-        listOf(Manifest.permission.ACCESS_MEDIA_LOCATION).filterNot(::granted)
-
-    protected fun proceedWithPermissions(missing: List<String>) {
+    protected fun proceedWithPermissions() {
+        val missing = requiredPermissions().filterNot(::granted)
         if (missing.isEmpty()) {
             onPermissionsReady()
         } else {
             awaitingResult = true
-            requestPermissions(missing.toTypedArray(), REQ_PERMS)
+            requestPermissions((missing + alsoRequestedPermissions()).distinct().toTypedArray(), REQ_PERMS)
         }
     }
 
@@ -79,10 +81,11 @@ abstract class BridgeActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQ_PERMS) return
         awaitingResult = false
+        val denied = requiredPermissions().filterNot(::granted)
         when {
             grantResults.isEmpty() -> fail(R.string.err_no_permission)
-            granted(Manifest.permission.ACCESS_MEDIA_LOCATION) -> onPermissionsReady()
-            else -> fail(PhotoBridge.onPermissionDenied(this))
+            denied.isEmpty() -> onPermissionsReady()
+            else -> fail(PhotoBridge.onPermissionDenied(this, denied))
         }
     }
 

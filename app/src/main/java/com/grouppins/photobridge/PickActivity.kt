@@ -6,7 +6,7 @@ class PickActivity : BridgeActivity() {
 
     override fun onFirstCreate() {
         PhotoBridge.cleanupSharedCache(this)
-        proceedWithPermissions(missingMediaLocation())
+        proceedWithPermissions()
     }
 
     override fun onPermissionsReady() = launchPicker()

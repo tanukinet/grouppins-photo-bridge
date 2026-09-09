@@ -16,7 +16,7 @@ UI なしミニアプリ。
   Android は未宣言のアプリからの通信を OS が拒否するため、写真も位置情報も
   どこかへ送信すること自体ができない
 - ネットワーク系の API (`java.net` / `HttpURLConnection` / WebView 等) を
-  1 つも import していない。Kotlin 6 ファイル・約 1,100 行で全部読める
+  1 つも import していない。Kotlin 6 ファイル・約 1,200 行で全部読める
 - 直接の依存ライブラリは `androidx.exifinterface` (EXIF 読み取り) と `androidx.core`
   (FileProvider) の 2 つだけ。推移的に入るのは AndroidX の基盤ライブラリ (annotation /
   collection / concurrent-futures / lifecycle / profileinstaller / startup / tracing ほか)、
@@ -97,15 +97,19 @@ URL パラメータで PWA へ渡すのがこのアプリの役割。
 
 **初回セットアップ**: ランチャーから「GroupPins 写真取込」を一度起動し、権限
 (メディアの位置情報 + 写真へのアクセス) を許可する。DocumentsProvider (経路 1) は
-自分で権限を要求できないため、この初回起動が必須。
+自分で権限を要求できないため、この初回起動が必須。写真へのアクセスは **「すべて許可」が
+必要**で、Android 14 以降の「写真を選択」(一部のみ) は権限不足として扱い、ピッカーを
+開かずに終了する (部分許可のままでは経路 1 の一覧が選んだ写真だけになり、経路 0 / 2 でも
+選択外の写真の GPS を読めないため)。もう一度ランチャーから起動すると選び直せる。
 
 **経路 0 (推奨). マップ画面のカメラボタン → 自動で写真ごと戻る**:
 1. GroupPins のカメラボタン → intent URL (`grouppins-photo://pick`) でこのアプリが開く
 2. 写真を選ぶと、**GroupPins の WebAPK (インストール済み PWA) の share Activity へ
    写真ごと直接共有**して自動で戻る (共有シートは出ない)。受け取りは経路 2 と同じ
    Web Share Target (`/?shared_photos=`)。渡す写真の中身は経路 2 と同じ縮小コピー
-3. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) では従来の
-   座標のみ URL (`?photo_lat=` / `?photo_batch=`) へ自動フォールバック
+3. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) と、WebAPK の
+   Web Share Target が実際に渡す枚数・形式 (単一 / 複数、JPEG / PNG) を受け付けない場合は、
+   従来の座標のみ URL (`?photo_lat=` / `?photo_batch=`) へ自動フォールバック
 
 **経路 1. ファイル選択で「GroupPins 写真取込」を選ぶ (DocumentsProvider)**:
 1. ブラウザの任意のファイル選択 (写真を添付する箇所など) を開く
@@ -116,13 +120,17 @@ URL パラメータで PWA へ渡すのがこのアプリの役割。
 4. 権限が足りないときは黙って劣化させず失敗する。「写真へのアクセス」が無いと一覧の
    読み込みがエラーになり、「メディアの位置情報」が無いと (GPS を消した写真を代わりに
    渡さずに) 写真を開けない。どちらもランチャーからアプリを起動して権限を許可し直せば直る
+   (「一部のみ」の部分許可も同じ扱いで、ランチャー起動時の権限ダイアログで「すべて許可」へ
+   切り替えられる)
 
 **経路 2. アプリを起動して GroupPins へ送る**:
 1. ランチャーから「GroupPins 写真取込」を起動 → 写真を選択 (複数可)
 2. 写真の縮小コピーを cache に作って共有シートが開くので **GroupPins** を選ぶ。
    コピーは長辺 2048px に縮小した JPEG (品質 85) で、EXIF は GPS と撮影時刻だけを
    書き戻す (機種名・メーカーノート等は落ちる)。透過を持つ PNG は PNG のまま縮小する。
-   デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残る)
+   デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残る)。
+   EXIF を読めない・書き戻せない写真や、GPS 付きの原本を開けない写真は原本で代替せずに
+   除外し、「N 枚中 M 枚」のトーストで知らせる
 3. PWA の Web Share Target (POST /share-target → service worker) が写真を受け取り、
    位置判定 + 写真添付の既存フローへ流れる
 
@@ -146,8 +154,10 @@ APK は **GitHub Actions が本 repo のソースからビルドして署名**�
 sha256sum -c grouppins-photo-bridge-<version>.apk.sha256
 ```
 
-CI は APK を公開する前に、署名が有効であることと `INTERNET` 権限が含まれないことを
-検証しており、どちらかが崩れるとリリース自体が失敗する。ビルドの実行ログは
+CI は APK を公開する前に、署名が有効で登録済みの鍵 (`RELEASE_CERT_SHA256`) によるもので
+あることと、`INTERNET` 権限が含まれないことを検証しており、どれかが崩れるとリリース自体が
+失敗する。署名者の証明書 SHA-256 は各リリースのノートに載せており、
+`apksigner verify --print-certs` で手元の APK と突き合わせられる。ビルドの実行ログも
 各リリースのノートからたどれる。
 
 ### リリースを出す (メンテナ向け)
@@ -161,14 +171,18 @@ base64 -w0 release.jks | gh secret set KEYSTORE_BASE64
 gh secret set KEYSTORE_PASSWORD
 gh secret set KEY_ALIAS
 gh secret set KEY_PASSWORD
+keytool -list -v -keystore release.jks -alias release \
+  | sed -n 's/.*SHA256: //p' | tr -d ':\n' | tr 'A-F' 'a-f' | gh variable set RELEASE_CERT_SHA256
 
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
 `release.jks` は repo に入れない。これを失うと同じ署名で更新できなくなるため
-別途保管する。`versionName` はタグ (先頭の `v` を除いたもの)、`versionCode` はタグの
-`X.Y.Z` から `X×1,000,000 + Y×1,000 + Z` で導出する (`Y` / `Z` は 999 まで。形式が合わないと
-workflow が失敗する)。タグ以外での実行 (`workflow_dispatch` の dev ビルド) は `versionCode` に
+別途保管する。`RELEASE_CERT_SHA256` (repo variable) は署名鍵の証明書の SHA-256 で、
+CI が APK の署名者と突き合わせる。未設定や不一致 (鍵の差し替え) ではリリースが失敗する。
+`versionName` はタグ (先頭の `v` を除いたもの)、`versionCode` はタグの
+`X.Y.Z` から `X×1,000,000 + Y×1,000 + Z` で導出する (`X` は 2099 まで、`Y` / `Z` は 999 まで。
+形式が合わないと workflow が失敗する)。タグ以外での実行 (`workflow_dispatch` の dev ビルド) は `versionCode` に
 Actions の実行番号が入り、正式版より常に小さくなるので、正式版が入った端末には
 上書きインストールできない (先にアンインストールする)。
 
@@ -229,9 +243,12 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - クラウドのみの写真 (端末に実体が無い) は、開くのに全体のダウンロードが必要で
   事前判別もできないため、開くのを 5 秒で打ち切って「クラウドのみの写真のため読み込めませんでした」
   (複数枚なら部分読み込みトースト) を出す。一度打ち切った写真は同じ処理の中で開き直さず、
-  待ち時間の合計が 30 秒を超えたら以降の打ち切りは 1 秒に短縮する。この打ち切りは
-  `openFileDescriptor` にしか効かないので、open は即座に返して読み取りで止まる provider には
+  待ち時間の合計が 30 秒を超えたら以降の打ち切りは 1 秒に短縮する。この打ち切りは open
+  (`openFileDescriptor`) に掛かるもので、open は即座に返して読み取りで止まる provider には
   効かない。読み込み中は透明な画面のまま (進捗表示は無い) で、Back で中断できる
+- GPS 付きの原本 (`setRequireOriginal`) を開けなかった写真は、GPS を消した読み取りで代替せずに
+  除外する (経路 1 の provider と同じ方針)。選んだ写真が全部これに当たると
+  「GPS 付きの元写真を開けませんでした」を出す。写真へのアクセスが「一部のみ」のときに起きる
 - 複数枚を選んで一部しか処理できなかったときは、どの経路でも「N 枚中 M 枚を読み込みました」の
   トーストを出す (黙って落とさない)
 - GroupPins (PWA) 側の受け口は URL パラメータ (`photo_lat` / `photo_batch` /
@@ -267,3 +284,14 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - `MatrixCursor.RowBuilder.add(列名, 値)` は、カーソルに無い列名を黙って無視する
   (javadoc に明記)。DocumentsProvider が呼び出し側の projection をそのまま列定義に使い、
   全列を `add` して良いのはこのため
+- 権限結果の判定は `requiredPermissions()` の全件が付与されたかで行う (`grantResults` の
+  配列は見ない)。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
+  ランチャー起動のたびに再要求する。部分許可からの拡張は `READ_MEDIA_IMAGES` の明示的な
+  再要求でしか起きないため、`READ_MEDIA_VISUAL_USER_SELECTED` が付いていても要求を省かない
+- `ShareActivity` の URI grant 検査は先頭 `MAX_PHOTOS` 件だけに掛ける。`PhotoBridge` も同じ
+  定数で先頭から処理するため、検査していない URI を開くことはない (上限は両者で共有する)
+- 経路 1 のフォルダ一覧は、MediaStore に「フォルダ」のテーブルが無いため写真行の `BUCKET_ID`
+  から作るしかない。Android 11 以降は `QUERY_ARG_SQL_GROUP_BY` でフォルダ数ぶんの行だけを
+  受け取り (各フォルダの更新日時は `LIMIT 1` の小クエリで別途取る)、`MediaStore.getGeneration()`
+  の世代番号が変わるまで作り直さない。Android 10 はどちらも無いので、全行を走査して
+  30 秒キャッシュする従来の形のまま

@@ -37,13 +37,13 @@ jobs:
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
             VERSION_NAME="${GITHUB_REF_NAME#v}"
-            if ! [[ "$VERSION_NAME" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              echo "タグは vX.Y.Z 形式にしてください (受け取った値: $GITHUB_REF_NAME)" >&2
+            if ! [[ "$VERSION_NAME" =~ ^([0-9]{1,4})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+              echo "タグは vX.Y.Z 形式にしてください (X は 4 桁、Y / Z は 3 桁まで。受け取った値: $GITHUB_REF_NAME)" >&2
               exit 1
             fi
             MAJOR=${BASH_REMATCH[1]}; MINOR=${BASH_REMATCH[2]}; PATCH=${BASH_REMATCH[3]}
-            if [ "$((10#$MINOR))" -gt 999 ] || [ "$((10#$PATCH))" -gt 999 ]; then
-              echo "versionCode に収めるため Y / Z は 999 以下にしてください (受け取った値: $GITHUB_REF_NAME)" >&2
+            if [ "$((10#$MAJOR))" -gt 2099 ]; then
+              echo "versionCode に収めるため X は 2099 以下にしてください (受け取った値: $GITHUB_REF_NAME)" >&2
               exit 1
             fi
             VERSION_CODE=$((10#$MAJOR * 1000000 + 10#$MINOR * 1000 + 10#$PATCH))
@@ -73,9 +73,29 @@ jobs:
         run: gradle assembleRelease --no-daemon
 
       - name: Verify APK
+        env:
+          RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose "$APK"
+          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+          ACTUAL=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "$CERTS" | tr -d '[:space:]' | tr 'A-F' 'a-f')
+          if [ -z "$ACTUAL" ]; then
+            echo "apksigner の出力から署名者の SHA-256 を読めませんでした:" >&2
+            printf '%s\n' "$CERTS" >&2
+            exit 1
+          fi
+          EXPECTED=$(tr -d ':[:space:]' <<< "$RELEASE_CERT_SHA256" | tr 'A-F' 'a-f')
+          if [ -z "$EXPECTED" ]; then
+            echo "vars.RELEASE_CERT_SHA256 が未設定です (README「リリースを出す」の手順で登録してください)" >&2
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "署名者が登録済みの鍵と一致しません (APK: $ACTUAL / 登録: $EXPECTED)" >&2
+            exit 1
+          fi
+          echo "CERT_SHA256=$ACTUAL" >> "$GITHUB_ENV"
           PERMS=$("$ANDROID_HOME/build-tools/35.0.0/aapt2" dump permissions "$APK")
           if ! grep -qx "package: com.grouppins.photobridge" <<< "$PERMS"; then
             echo "aapt2 の出力に package 行が無く、権限を検査できていません:" >&2
@@ -115,11 +135,14 @@ jobs:
             cat "${APK_NAME}.sha256"
             echo '```'
             echo
-            echo "ビルド時に APK の署名と INTERNET 権限の不在を検証しています"
-            echo "(workflow の Verify APK ステップ)。手元でも確認できます:"
+            echo "署名者の証明書 SHA-256: \`${CERT_SHA256}\`"
+            echo
+            echo "ビルド時に APK の署名が登録済みの鍵によるものであることと、INTERNET 権限の不在を"
+            echo "検証しています (workflow の Verify APK ステップ)。手元でも確認できます:"
             echo
             echo '```'
             echo "sha256sum -c ${APK_NAME}.sha256"
+            echo "\$ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs ${APK_NAME}"
             echo "\$ANDROID_HOME/build-tools/35.0.0/aapt2 dump permissions ${APK_NAME}"
             echo '```'
           } > notes.md

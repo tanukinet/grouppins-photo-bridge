@@ -1,5 +1,6 @@
 package com.grouppins.photobridge
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
@@ -7,6 +8,8 @@ import android.database.MatrixCursor
 import android.graphics.Bitmap
 import android.graphics.Point
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
@@ -16,6 +19,7 @@ import android.provider.DocumentsProvider
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
+import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -71,6 +75,7 @@ class PhotosDocumentsProvider : DocumentsProvider() {
 
     private var bucketCache: List<BucketEntry>? = null
     private var bucketCacheAt = 0L
+    private var bucketCacheGeneration: Long? = null
 
     override fun onCreate(): Boolean = true
 
@@ -153,11 +158,76 @@ class PhotosDocumentsProvider : DocumentsProvider() {
     }
 
     private fun loadBuckets(): List<BucketEntry> {
+        val generation = mediaGeneration()
         synchronized(this) {
             bucketCache?.let {
-                if (System.currentTimeMillis() - bucketCacheAt < BUCKET_CACHE_TTL_MS) return it
+                val fresh = if (generation != null) {
+                    generation == bucketCacheGeneration
+                } else {
+                    System.currentTimeMillis() - bucketCacheAt < BUCKET_CACHE_TTL_MS
+                }
+                if (fresh) return it
             }
         }
+        val buckets = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) groupedBuckets() else scannedBuckets()
+        synchronized(this) {
+            bucketCache = buckets
+            bucketCacheAt = System.currentTimeMillis()
+            bucketCacheGeneration = generation
+        }
+        return buckets
+    }
+
+    private fun mediaGeneration(): Long? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            MediaStore.getGeneration(context!!, MediaStore.VOLUME_EXTERNAL)
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaStore.getGeneration failed; using the time-based bucket cache", e)
+            null
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun groupedBuckets(): List<BucketEntry> {
+        val args = Bundle().apply {
+            putString(ContentResolver.QUERY_ARG_SQL_GROUP_BY, MediaStore.Images.Media.BUCKET_ID)
+            putInt(ContentResolver.QUERY_ARG_LIMIT, MAX_ITEMS)
+        }
+        val names = LinkedHashMap<Long, String?>()
+        context!!.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Images.Media.BUCKET_ID, MediaStore.Images.Media.BUCKET_DISPLAY_NAME),
+            args,
+            null,
+        )?.use { cursor ->
+            val idIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
+            val nameIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            while (cursor.moveToNext()) names[cursor.getLong(idIdx)] = cursor.getString(nameIdx)
+        }
+        return names
+            .map { (id, name) -> BucketEntry(id, name, newestModifiedSec(id)) }
+            .sortedByDescending { it.lastModifiedSec }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun newestModifiedSec(bucketId: Long): Long {
+        val args = Bundle().apply {
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, "${MediaStore.Images.Media.BUCKET_ID} = ?")
+            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf(bucketId.toString()))
+            putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "${MediaStore.Images.Media.DATE_MODIFIED} DESC")
+            putInt(ContentResolver.QUERY_ARG_LIMIT, 1)
+        }
+        context!!.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Images.Media.DATE_MODIFIED),
+            args,
+            null,
+        )?.use { cursor -> if (cursor.moveToNext()) return cursor.getLong(0) }
+        return 0L
+    }
+
+    private fun scannedBuckets(): List<BucketEntry> {
         val seen = LinkedHashMap<Long, BucketEntry>()
         queryMediaStore(null, null, projection = BUCKET_PROJECTION) { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
@@ -170,40 +240,37 @@ class PhotosDocumentsProvider : DocumentsProvider() {
                 }
             }
         }
-        val buckets = seen.values.toList()
-        if (buckets.isNotEmpty()) {
-            synchronized(this) {
-                bucketCache = buckets
-                bucketCacheAt = System.currentTimeMillis()
-            }
-        }
-        return buckets
+        return seen.values.toList()
+    }
+
+    private data class SortSpec(val column: String, val desc: Boolean)
+
+    private fun parseSortOrder(sortOrder: String?): SortSpec? {
+        val first = sortOrder?.substringBefore(',')?.trim().orEmpty()
+        if (first.isEmpty()) return null
+        val parts = first.split(Regex("\\s+"))
+        return SortSpec(parts[0], parts.getOrNull(1).equals("DESC", ignoreCase = true))
     }
 
     private fun sortBuckets(buckets: List<BucketEntry>, sortOrder: String?): List<BucketEntry> {
-        if (sortOrder.isNullOrBlank()) return buckets
-        val desc = sortOrder.contains("DESC", ignoreCase = true)
-        val comparator: Comparator<BucketEntry> = when {
-            sortOrder.contains(Document.COLUMN_DISPLAY_NAME) ->
-                compareBy(String.CASE_INSENSITIVE_ORDER) { it.name ?: "" }
-            sortOrder.contains(Document.COLUMN_LAST_MODIFIED) -> compareBy { it.lastModifiedSec }
+        val spec = parseSortOrder(sortOrder) ?: return buckets
+        val comparator: Comparator<BucketEntry> = when (spec.column) {
+            Document.COLUMN_DISPLAY_NAME -> compareBy(String.CASE_INSENSITIVE_ORDER) { it.name ?: "" }
+            Document.COLUMN_LAST_MODIFIED -> compareBy { it.lastModifiedSec }
             else -> return buckets
         }
-        return buckets.sortedWith(if (desc) comparator.reversed() else comparator)
+        return buckets.sortedWith(if (spec.desc) comparator.reversed() else comparator)
     }
 
     private fun translateSortOrder(sortOrder: String?): String {
         val default = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media._ID} DESC"
-        if (sortOrder.isNullOrBlank()) return default
-        val desc = sortOrder.contains("DESC", ignoreCase = true)
-        val dir = if (desc) "DESC" else "ASC"
-        return when {
-            sortOrder.contains(Document.COLUMN_DISPLAY_NAME) ->
-                "${MediaStore.Images.Media.DISPLAY_NAME} $dir"
-            sortOrder.contains(Document.COLUMN_LAST_MODIFIED) ->
+        val spec = parseSortOrder(sortOrder) ?: return default
+        val dir = if (spec.desc) "DESC" else "ASC"
+        return when (spec.column) {
+            Document.COLUMN_DISPLAY_NAME -> "${MediaStore.Images.Media.DISPLAY_NAME} $dir"
+            Document.COLUMN_LAST_MODIFIED ->
                 "${MediaStore.Images.Media.DATE_MODIFIED} $dir, ${MediaStore.Images.Media._ID} $dir"
-            sortOrder.contains(Document.COLUMN_SIZE) ->
-                "${MediaStore.Images.Media.SIZE} $dir"
+            Document.COLUMN_SIZE -> "${MediaStore.Images.Media.SIZE} $dir"
             else -> default
         }
     }
@@ -258,6 +325,8 @@ class PhotosDocumentsProvider : DocumentsProvider() {
             throw e
         } catch (e: IOException) {
             throw FileNotFoundException("thumbnail write failed: $documentId (${e.message})")
+        } finally {
+            bitmap.recycle()
         }
     }
 
