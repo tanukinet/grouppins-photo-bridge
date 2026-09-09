@@ -36,11 +36,23 @@ jobs:
       - name: Resolve version
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+            if ! [[ "$VERSION_NAME" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "タグは vX.Y.Z 形式にしてください (受け取った値: $GITHUB_REF_NAME)" >&2
+              exit 1
+            fi
+            MAJOR=${BASH_REMATCH[1]}; MINOR=${BASH_REMATCH[2]}; PATCH=${BASH_REMATCH[3]}
+            if [ "$((10#$MINOR))" -gt 999 ] || [ "$((10#$PATCH))" -gt 999 ]; then
+              echo "versionCode に収めるため Y / Z は 999 以下にしてください (受け取った値: $GITHUB_REF_NAME)" >&2
+              exit 1
+            fi
+            VERSION_CODE=$((10#$MAJOR * 1000000 + 10#$MINOR * 1000 + 10#$PATCH))
           else
-            echo "VERSION_NAME=0.0.0-dev.${{ github.run_number }}" >> "$GITHUB_ENV"
+            VERSION_NAME="0.0.0-dev.${{ github.run_number }}"
+            VERSION_CODE=${{ github.run_number }}
           fi
-          echo "VERSION_CODE=${{ github.run_number }}" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
       - name: Decode keystore
         env:
@@ -64,7 +76,13 @@ jobs:
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
-          if "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump permissions "$APK" | grep -q "android.permission.INTERNET"; then
+          PERMS=$("$ANDROID_HOME/build-tools/35.0.0/aapt2" dump permissions "$APK")
+          if ! grep -qx "package: com.grouppins.photobridge" <<< "$PERMS"; then
+            echo "aapt2 の出力に package 行が無く、権限を検査できていません:" >&2
+            printf '%s\n' "$PERMS" >&2
+            exit 1
+          fi
+          if grep -q "android.permission.INTERNET" <<< "$PERMS"; then
             echo "INTERNET 権限が APK に含まれています" >&2
             exit 1
           fi
@@ -77,7 +95,6 @@ jobs:
           echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v7
         with:
           name: apk-${{ env.VERSION_NAME }}
@@ -86,7 +103,7 @@ jobs:
             ${{ env.APK_NAME }}.sha256
 
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -6,7 +6,8 @@ plugins {
 val keystorePath: String? = System.getenv("KEYSTORE_PATH")
 
 gradle.taskGraph.whenReady {
-    if (keystorePath == null && allTasks.any { it.path.endsWith(":assembleRelease") }) {
+    val packagesRelease = allTasks.any { it.path.matches(Regex(""":app:package\w*Release(Bundle)?""")) }
+    if (keystorePath == null && packagesRelease) {
         throw GradleException(
             "release ビルドには署名鍵が必要です。KEYSTORE_PATH / KEYSTORE_PASSWORD / " +
                 "KEY_ALIAS / KEY_PASSWORD を設定してください (未署名の APK は配布しない)",
