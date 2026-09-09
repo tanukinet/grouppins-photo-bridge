@@ -8,19 +8,29 @@ UI なしミニアプリ。
 
 写真と位置情報という強い権限を要求するアプリなので、何ができないかを先に書く。
 
-- このアプリがすることは 2 つだけ。**写真の EXIF から GPS と撮影時刻を読む**ことと、
-  読んだ結果を **`https://grouppins.com/` を開く / 共有シートへ渡す**ことで、
-  それ以外の出口を持たない
+- このアプリがすることは、**写真の EXIF から GPS と撮影時刻を読む**ことと、読んだ結果や
+  写真そのものを **ユーザーがその場で選んだ相手へ渡す**ことだけで、それ以外の出口を持たない。
+  写真が出ていく経路は [使い方](#使い方) の経路 0 / 1 / 2 の 3 つで、どれもユーザーの操作
+  (写真を選ぶ・共有先を選ぶ・ファイル選択で本アプリを選ぶ) が無ければ何も出ない
 - **`INTERNET` 権限を宣言していない** ([AndroidManifest.xml](app/src/main/AndroidManifest.xml))。
   Android は未宣言のアプリからの通信を OS が拒否するため、写真も位置情報も
   どこかへ送信すること自体ができない
 - ネットワーク系の API (`java.net` / `HttpURLConnection` / WebView 等) を
-  1 つも import していない。Kotlin 5 ファイル・約 1,300 行で全部読める
+  1 つも import していない。Kotlin 6 ファイル・約 1,100 行で全部読める
 - 直接の依存ライブラリは `androidx.exifinterface` (EXIF 読み取り) と `androidx.core`
-  (FileProvider) の 2 つだけ。推移的に入るのも AndroidX と Kotlin の標準ライブラリのみで、
-  解析ツール・広告 SDK・クラッシュレポーターの類は無い (`./gradlew :app:dependencies` で確認できる)
-- 写真が渡る先は、ユーザーが選んだ共有先 (= GroupPins の PWA) だけ。
-  端末外への送信はその共有先のアプリが行う
+  (FileProvider) の 2 つだけ。推移的に入るのは AndroidX の基盤ライブラリ (annotation /
+  collection / concurrent-futures / lifecycle / profileinstaller / startup / tracing ほか)、
+  Kotlin 標準ライブラリと kotlinx-coroutines、`com.google.guava:listenablefuture`
+  (インターフェース 1 つだけの stub)、`org.jetbrains:annotations` で、解析ツール・広告 SDK・
+  クラッシュレポーターの類は無い
+  (`gradle :app:dependencies --configuration releaseRuntimeClasspath` で全一覧が出る)
+- 写真が渡る先は、ユーザーがその場で選んだ相手だけ。経路 0 は署名検証済みの GroupPins の
+  WebAPK、経路 2 は共有シートで選んだアプリ、経路 1 は **ファイル選択で「GroupPins 写真取込」を
+  選んだ任意のアプリ** で、経路 1 では本来 `ACCESS_MEDIA_LOCATION` を持たないアプリにも
+  ユーザーの選択を条件に GPS EXIF 付きの原本が渡る。端末外への送信は受け取ったアプリが行う
+- 共有シートから受け取った写真 (ShareActivity) は、共有元が読み取り許可 (URI grant) を
+  付けて渡したものだけを開く。自アプリの写真アクセス権限で、他アプリが指定した任意の
+  写真を開くことはしない
 - 共有シートを出さずに写真を直接渡す経路 (経路 0) では、渡す相手が **Chrome の WebAPK
   minting サーバーの署名鍵で署名されている**ことを検証してから渡す
   (`PhotoBridge.WEBAPK_SIGNER_CERT_SHA256`)。`org.chromium.webapk.*` というパッケージ名と
@@ -32,10 +42,12 @@ UI なしミニアプリ。
 
 ## 自分で確かめる
 
-ビルドした APK の権限一覧はソースを信じなくても直接見られる。
+ビルドした APK の権限一覧はソースを信じなくても直接見られる
+(ビルド環境は [環境構築](#環境構築-ubuntu--wsl2初回のみ) を参照。Gradle wrapper は
+コミットしていないので、clone 直後は `./gradlew` ではなく `gradle` を使う)。
 
 ```bash
-./gradlew assembleDebug
+gradle assembleDebug
 $ANDROID_HOME/build-tools/35.0.0/aapt2 dump permissions \
   app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -57,6 +69,22 @@ uses-permission: name='com.grouppins.photobridge.DYNAMIC_RECEIVER_NOT_EXPORTED_P
 **自アプリ名前空間の signature レベル権限**で、他アプリや OS の機能への
 アクセス権ではない。
 
+権限と同様に、依存ライブラリの manifest からマージされるコンポーネントも APK から直接見られる。
+
+```bash
+$ANDROID_HOME/build-tools/35.0.0/aapt2 dump xmltree --file AndroidManifest.xml \
+  app/build/outputs/apk/debug/app-debug.apk \
+  | grep -E 'E: (activity|provider|receiver|service)|android:(name|exported|permission)\('
+```
+
+ソースの manifest にある 3 つの Activity と 2 つの provider のほかに、以下の 2 つが
+`androidx.core` → `androidx.lifecycle` → `androidx.profileinstaller` 経由でマージされる。
+
+| コンポーネント | exported | 内容 |
+|---|---|---|
+| `androidx.startup.InitializationProvider` | false | 起動時に profileinstaller を初期化するだけの provider |
+| `androidx.profileinstaller.ProfileInstallReceiver` | **true** | ART の実行プロファイルを受け取る receiver。`android.permission.DUMP` (システムと `adb shell` しか持てない signature 権限) で保護されており、通常のアプリからは呼べない |
+
 ## なぜ必要か
 
 Android 10 以降、`ACCESS_MEDIA_LOCATION` 権限を持たないアプリ (= Chrome / Web アプリ全般) が
@@ -75,7 +103,7 @@ URL パラメータで PWA へ渡すのがこのアプリの役割。
 1. GroupPins のカメラボタン → intent URL (`grouppins-photo://pick`) でこのアプリが開く
 2. 写真を選ぶと、**GroupPins の WebAPK (インストール済み PWA) の share Activity へ
    写真ごと直接共有**して自動で戻る (共有シートは出ない)。受け取りは経路 2 と同じ
-   Web Share Target (`/?shared_photos=`)
+   Web Share Target (`/?shared_photos=`)。渡す写真の中身は経路 2 と同じ縮小コピー
 3. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) では従来の
    座標のみ URL (`?photo_lat=` / `?photo_batch=`) へ自動フォールバック
 
@@ -85,10 +113,16 @@ URL パラメータで PWA へ渡すのがこのアプリの役割。
 3. 端末ローカルの写真一覧 (新しい順) から選択 → **GPS 付き原本**がブラウザに渡り、
    位置判定と写真添付が 1 回の選択で完結する
    (標準の「最近」やフォトピッカーから選ぶと OS が GPS を削除するので注意)
+4. 権限が足りないときは黙って劣化させず失敗する。「写真へのアクセス」が無いと一覧の
+   読み込みがエラーになり、「メディアの位置情報」が無いと (GPS を消した写真を代わりに
+   渡さずに) 写真を開けない。どちらもランチャーからアプリを起動して権限を許可し直せば直る
 
 **経路 2. アプリを起動して GroupPins へ送る**:
 1. ランチャーから「GroupPins 写真取込」を起動 → 写真を選択 (複数可)
-2. GPS 付き原本を cache へコピーして共有シートが開くので **GroupPins** を選ぶ
+2. 写真の縮小コピーを cache に作って共有シートが開くので **GroupPins** を選ぶ。
+   コピーは長辺 2048px に縮小した JPEG (品質 85) で、EXIF は GPS と撮影時刻だけを
+   書き戻す (機種名・メーカーノート等は落ちる)。透過を持つ PNG は PNG のまま縮小する。
+   デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残る)
 3. PWA の Web Share Target (POST /share-target → service worker) が写真を受け取り、
    位置判定 + 写真添付の既存フローへ流れる
 
@@ -132,8 +166,11 @@ git tag v1.0.0 && git push origin v1.0.0
 ```
 
 `release.jks` は repo に入れない。これを失うと同じ署名で更新できなくなるため
-別途保管する。`versionName` はタグ (先頭の `v` を除いたもの)、`versionCode` は
-Actions の実行番号が入る。
+別途保管する。`versionName` はタグ (先頭の `v` を除いたもの)、`versionCode` はタグの
+`X.Y.Z` から `X×1,000,000 + Y×1,000 + Z` で導出する (`Y` / `Z` は 999 まで。形式が合わないと
+workflow が失敗する)。タグ以外での実行 (`workflow_dispatch` の dev ビルド) は `versionCode` に
+Actions の実行番号が入り、正式版より常に小さくなるので、正式版が入った端末には
+上書きインストールできない (先にアンインストールする)。
 
 ## ビルドとインストール
 
@@ -190,9 +227,13 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - 接続先 URL は `PhotoBridge.kt` の `TARGET_URL` にハードコードしている
 - 元写真に GPS が無い場合は「写真に位置情報がありません」のトーストを出して終了する
 - クラウドのみの写真 (端末に実体が無い) は、開くのに全体のダウンロードが必要で
-  事前判別もできないため、5 秒でスキップして「クラウドのみの写真のため読み込めませんでした」
-  (複数枚なら部分読み込みトースト) を出す。読み込み自体はワーカースレッドで行うため
-  待ち中もアプリは応答する
+  事前判別もできないため、開くのを 5 秒で打ち切って「クラウドのみの写真のため読み込めませんでした」
+  (複数枚なら部分読み込みトースト) を出す。一度打ち切った写真は同じ処理の中で開き直さず、
+  待ち時間の合計が 30 秒を超えたら以降の打ち切りは 1 秒に短縮する。この打ち切りは
+  `openFileDescriptor` にしか効かないので、open は即座に返して読み取りで止まる provider には
+  効かない。読み込み中は透明な画面のまま (進捗表示は無い) で、Back で中断できる
+- 複数枚を選んで一部しか処理できなかったときは、どの経路でも「N 枚中 M 枚を読み込みました」の
+  トーストを出す (黙って落とさない)
 - GroupPins (PWA) 側の受け口は URL パラメータ (`photo_lat` / `photo_batch` /
   `shared_photos`) と Web Share Target (POST `/share-target`)
 - 一度に取り込める写真の上限 (`PhotoBridge.kt` の `MAX_PHOTOS`) は PWA 側の上限と
@@ -211,3 +252,18 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   届かなくなる (全経路が自前の `finish()` で終了する)
 - `BitmapFactory.decodeStream` は `inJustDecodeBounds = true` のとき仕様上必ず null を
   返す。戻り値で成否を判定してはならず、直後の `outWidth` / `outHeight` で判定する
+- Activity が復元される (`savedInstanceState` あり) のは、権限ダイアログや SAF の裏で
+  プロセスが落ちた後など。結果待ち中なら生かして結果を受け取り、待ち中でなければ即
+  `finish()` する (透明な画面が残るのを防ぐ)。待ち中に `finish()` すると届いた結果が
+  捨てられるため、待ち状態を `onSaveInstanceState` で保存している (`BridgeActivity`)
+- 共有先の `startActivity` は Activity が resumed のときだけ行う。Android 10 以降、
+  バックグラウンドからの起動は例外を投げずに無言で捨てられるため、読み込み中に
+  他アプリへ切り替えられていたら `onResume` まで遅延する
+- `ShareActivity` の `checkUriPermission(uri, myPid, myUid, FLAG_GRANT_READ_URI_PERMISSION)` は
+  明示的な URI grant だけを見る (自アプリの `READ_MEDIA_IMAGES` は考慮されない)。共有元が
+  grant を付けずに `content://media/...` を投げてきた場合にこれが拒否になる
+- 権限ダイアログが中断されると `grantResults` が空で返る。これは拒否ではないので、設定画面へ
+  誘導せず「許可されませんでした」で終了する
+- `MatrixCursor.RowBuilder.add(列名, 値)` は、カーソルに無い列名を黙って無視する
+  (javadoc に明記)。DocumentsProvider が呼び出し側の projection をそのまま列定義に使い、
+  全列を `add` して良いのはこのため
