@@ -32,6 +32,8 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
+import java.time.DateTimeException
+import java.time.LocalDate
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -64,7 +66,12 @@ object PhotoBridge {
 
     private val EXIF_DATE_TIME = Regex("""^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})""")
 
-    private data class PhotoMeta(val lat: Double?, val lng: Double?, val time: String?)
+    private data class PhotoMeta(val lat: Double?, val lng: Double?, val time: String?) {
+        fun located(): LocatedPhoto? =
+            if (lat != null && lng != null) LocatedPhoto(lat, lng, time) else null
+    }
+
+    internal data class LocatedPhoto(val lat: Double, val lng: Double, val time: String?)
 
     private val timeoutExecutor: ScheduledExecutorService by lazy {
         Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "PhotoBridge-timeout").apply { isDaemon = true } }
@@ -109,15 +116,25 @@ object PhotoBridge {
 
     private fun openPreferOriginalFd(activity: Activity, uri: Uri, stats: ExtractStats): ParcelFileDescriptor? {
         val timeoutMs = stats.openTimeoutMs(uri) ?: return null
+        // getMediaUri は MediaProvider への同期 binder 往復で、CancellationSignal を受け取らないため
+        // 中断できない。計測だけは先に始めて、経過を open の締切と打ち切り予算から差し引く
+        val startedAt = SystemClock.elapsedRealtime()
         val mediaUri: Uri? = try {
             if (uri.authority == MediaStore.AUTHORITY) uri else MediaStore.getMediaUri(activity, uri)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "could not resolve a MediaStore URI for $uri", e)
             null
+        }
+        if (mediaUri == null) {
+            Log.w(TAG, "opening $uri without setRequireOriginal; its GPS may have been redacted")
         }
         val target = if (mediaUri != null) MediaStore.setRequireOriginal(mediaUri) else uri
         val signal = CancellationSignal()
-        val startedAt = SystemClock.elapsedRealtime()
-        val cancel = timeoutExecutor.schedule({ signal.cancel() }, timeoutMs, TimeUnit.MILLISECONDS)
+        val cancel = timeoutExecutor.schedule(
+            { signal.cancel() },
+            timeoutMs - (SystemClock.elapsedRealtime() - startedAt),
+            TimeUnit.MILLISECONDS,
+        )
         return try {
             activity.contentResolver.openFileDescriptor(target, "r", signal)?.let { return it }
             Log.w(TAG, "no descriptor for $target")
@@ -228,8 +245,12 @@ object PhotoBridge {
     internal fun isoTimeOf(exifDateTime: String?): String? {
         val matched = EXIF_DATE_TIME.find(exifDateTime?.trim().orEmpty()) ?: return null
         val (year, month, day, hour, minute, second) = matched.destructured
-        if (month.toInt() !in 1..12 || day.toInt() !in 1..31) return null
         if (hour.toInt() > 23 || minute.toInt() > 59 || second.toInt() > 59) return null
+        try {
+            LocalDate.of(year.toInt(), month.toInt(), day.toInt())
+        } catch (_: DateTimeException) {
+            return null
+        }
         return "$year-$month-${day}T$hour:$minute:$second"
     }
 
@@ -242,7 +263,6 @@ object PhotoBridge {
                 ?: exif.getAttribute(ExifInterface.TAG_DATETIME),
         )
 
-        if (latLong == null && isoTime == null) return null
         return PhotoMeta(
             lat = latLong?.get(0),
             lng = latLong?.get(1),
@@ -250,9 +270,9 @@ object PhotoBridge {
         )
     }
 
-    private fun copyOriginalsToCache(activity: Activity, uris: List<Uri>, stats: ExtractStats): List<Uri> {
+    private fun copyOriginalsToCache(activity: Activity, uris: List<Uri>, stats: ExtractStats): List<File> {
         val dir = File(activity.cacheDir, CACHE_DIR).apply { mkdirs() }
-        val out = mutableListOf<Uri>()
+        val out = mutableListOf<File>()
         uris.take(MAX_PHOTOS).forEachIndexed { i, uri ->
             val file = try {
                 PhotoSource(activity, uri, stats).use { src ->
@@ -265,9 +285,16 @@ object PhotoBridge {
                 logSkipped(uri, e)
                 null
             } ?: return@forEachIndexed
-            out.add(FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file))
+            out.add(file)
         }
         return out
+    }
+
+    private fun sharedUriOf(activity: Activity, file: File): Uri =
+        FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file)
+
+    private fun deleteUnusedCopies(copies: List<File>) {
+        copies.forEach { if (!it.delete()) Log.w(TAG, "could not delete the unused copy ${it.name}") }
     }
 
     private fun logSkipped(uri: Uri, cause: Throwable) {
@@ -281,7 +308,7 @@ object PhotoBridge {
         val input = src.open() ?: return null
         val file = newCacheFile(dir, index, fallbackExtension(activity, src.uri))
         try {
-            input.use { src -> file.outputStream().use { dst -> src.copyTo(dst) } }
+            input.use { stream -> file.outputStream().use { dst -> stream.copyTo(dst) } }
         } catch (t: Throwable) {
             file.delete()
             throw t
@@ -465,9 +492,10 @@ object PhotoBridge {
                     emptyList()
                 }
             }
+            val checked = mutableSetOf<String>()
             for (info in candidates) {
                 val pkg = info.activityInfo?.packageName ?: continue
-                if (pkg in packages || !pkg.startsWith("org.chromium.webapk.")) continue
+                if (!pkg.startsWith("org.chromium.webapk.") || !checked.add(pkg)) continue
                 if (isSignedByWebApkServer(activity, pkg) && servesHost(activity, pkg, host)) packages += pkg
             }
         }
@@ -508,8 +536,8 @@ object PhotoBridge {
         }.start()
     }
 
-    private fun partialNotice(activity: Activity, requested: Int, delivered: Int): String? =
-        if (delivered >= requested) null else activity.getString(R.string.msg_partial_load, requested, delivered)
+    private fun partialNotice(activity: Activity, requested: Int, delivered: Int, messageRes: Int): String? =
+        if (delivered >= requested) null else activity.getString(messageRes, requested, delivered)
 
     private fun emptyBatchError(stats: ExtractStats): Int = when {
         stats.originalUnavailable > 0 -> R.string.err_original_unavailable
@@ -528,11 +556,14 @@ object PhotoBridge {
     }
 
     fun deliverAsync(activity: Activity, uris: List<Uri>, onDone: (Outcome) -> Unit) = runAsync(activity, onDone) {
+        val stats = ExtractStats()
         val targets = webApkTargets(activity)
-        if (!targets.isEmpty()) {
-            val stats = ExtractStats()
-            val shared = copyOriginalsToCache(activity, uris, stats)
-            if (shared.isNotEmpty()) {
+        if (targets.isEmpty()) {
+            Log.w(TAG, "no verified GroupPins WebAPK is installed; falling back to the coordinates-only URL")
+        } else {
+            val copies = copyOriginalsToCache(activity, uris, stats)
+            if (copies.isNotEmpty()) {
+                val shared = copies.map { sharedUriOf(activity, it) }
                 val action = shareAction(shared.size)
                 val types = shareMimeTypes(activity, shared)
                 val component = webApkComponentFor(targets, action, types)
@@ -541,15 +572,16 @@ object PhotoBridge {
                     return@runAsync Outcome.Launch(
                         send.setComponent(component),
                         R.string.err_launch_failed,
-                        partialNotice(activity, uris.size, shared.size),
+                        partialNotice(activity, uris.size, shared.size, R.string.msg_partial_load),
                     )
                 }
                 Log.w(TAG, "WebAPK does not accept $action $types; falling back to the coordinates-only URL")
+                deleteUnusedCopies(copies)
             } else if (stats.timedOut > 0 || stats.originalUnavailable > 0) {
                 return@runAsync Outcome.Error(emptyBatchError(stats))
             }
         }
-        extractAndOpenAll(activity, uris)
+        extractAndOpenAll(activity, uris, stats)
     }
 
     fun onPermissionDenied(activity: Activity, denied: List<String>): Int {
@@ -577,33 +609,21 @@ object PhotoBridge {
     private fun openUrl(url: Uri, notice: String? = null): Outcome =
         Outcome.Launch(Intent(Intent.ACTION_VIEW, url), R.string.err_no_browser, notice)
 
-    private fun extractAndOpen(activity: Activity, uri: Uri, stats: ExtractStats): Outcome {
-        val meta = extract(activity, uri, stats) ?: return Outcome.Error(emptyBatchError(stats))
-        if (meta.lat == null || meta.lng == null) {
-            return Outcome.Error(R.string.err_no_gps)
-        }
-        val url = Uri.parse(TARGET_URL).buildUpon()
-            .appendQueryParameter("photo_lat", meta.lat.toString())
-            .appendQueryParameter("photo_lng", meta.lng.toString())
-            .apply { if (meta.time != null) appendQueryParameter("photo_time", meta.time) }
-            .build()
-        return openUrl(url)
-    }
+    // 1 枚でも photo_batch で渡す。親 (map.tsx) は photo_lat 経路も「photo_batch 1 件相当」に
+    // 変換して同じ一括画面へ流すため、渡り方は等価。形を 1 つに絞るためだけの統一で、
+    // 挙動を良くする意図はない (v1.0.0 の APK は photo_lat を送るので親側の受け口は消せない)
+    internal fun batchParameterOf(located: List<LocatedPhoto>): String =
+        located.joinToString(";") { "${it.lat},${it.lng},${it.time ?: ""}" }
 
-    private fun extractAndOpenAll(activity: Activity, uris: List<Uri>): Outcome {
-        val stats = ExtractStats()
-        if (uris.size == 1) return extractAndOpen(activity, uris[0], stats)
+    private fun extractAndOpenAll(activity: Activity, uris: List<Uri>, stats: ExtractStats): Outcome {
         val readable = uris.take(MAX_PHOTOS).mapNotNull { extract(activity, it, stats) }
-        val metas = readable.filter { it.lat != null && it.lng != null }
-        if (metas.isEmpty()) {
+        val located = readable.mapNotNull { it.located() }
+        if (located.isEmpty()) {
             return Outcome.Error(if (readable.isNotEmpty()) R.string.err_no_gps else emptyBatchError(stats))
         }
-        val batch = metas.joinToString(";") { m ->
-            "${m.lat ?: ""},${m.lng ?: ""},${m.time ?: ""}"
-        }
         val url = Uri.parse(TARGET_URL).buildUpon()
-            .appendQueryParameter("photo_batch", batch)
+            .appendQueryParameter("photo_batch", batchParameterOf(located))
             .build()
-        return openUrl(url, partialNotice(activity, uris.size, metas.size))
+        return openUrl(url, partialNotice(activity, uris.size, located.size, R.string.msg_partial_coords))
     }
 }

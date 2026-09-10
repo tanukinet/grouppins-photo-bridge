@@ -20,3 +20,6 @@ jobs:
 
       - name: Build, test and lint
         run: gradle assembleDebug testDebugUnitTest lintDebug --no-daemon
+
+      - name: Verify APK permissions
+        run: .github/scripts/verify-apk.sh app/build/outputs/apk/debug/app-debug.apk

@@ -12,7 +12,7 @@ GroupPins へ渡して戻るだけの、UI なしミニアプリ。入口は 1 �
   Android は未宣言のアプリからの通信を OS が拒否するため、写真も位置情報も
   どこかへ送信すること自体ができない
 - ネットワーク系の API (`java.net` / `HttpURLConnection` / WebView 等) を
-  1 つも import していない。Kotlin 2 ファイル・約 800 行で全部読める
+  1 つも import していない。Kotlin 2 ファイル・約 850 行で全部読める
 - 直接の依存ライブラリは `androidx.exifinterface` (EXIF 読み取り) と `androidx.core`
   (FileProvider) の 2 つだけ。推移的に入るのは AndroidX の基盤ライブラリ (annotation /
   collection / concurrent-futures / lifecycle / profileinstaller / startup / tracing ほか)、
@@ -108,14 +108,15 @@ GPS と撮影日時を書き戻したコピーを PWA へ渡すのがこのア�
    share Activity へ写真ごと直接共有**して自動で戻る (共有シートは出ない)。
    受け取りは PWA の Web Share Target (`/?shared_photos=`)
 5. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) と、WebAPK が実際に渡す
-   枚数・形式を受け付けない場合は、座標のみの URL (`?photo_lat=` / `?photo_batch=`) を
+   枚数・形式を受け付けない場合は、座標のみの URL (`?photo_batch=`。1 枚でも同じ形) を
    ブラウザで開く経路へ自動フォールバックする
 
 渡すコピーは長辺 4096px を上限に縮小した **JPEG (品質 85)** で、4096px 以下の写真は縮小せず
 再エンコードだけ行う。EXIF は GPS と日時タグ (`DateTimeOriginal` = 撮影日時、`DateTime` =
 更新日時) を **原本にあるものだけ** 書き戻す (機種名・メーカーノート等は落ちる。原本に無い
-撮影日時を更新日時から作ることはしない)。向きは縮小した写真ではピクセルに焼き込み、縮小しない
-写真では `Orientation` タグで伝える。上限の 4096px は GroupPins の `photo_quality` の最大段に
+撮影日時を更新日時から作ることはしない)。向きは `createBitmap` で縮める写真ではピクセルに
+焼き込み、そのまま書き出す写真では `Orientation` タグで伝える (`inSampleSize` だけで 4096px
+以下に収まった写真は後者になる)。上限の 4096px は GroupPins の `photo_quality` の最大段に
 合わせた値で、プランごとの縮小は PWA とサーバーが行う。透過を持つ画像も JPEG になる
 (PWA の EXIF 読み取りが JPEG しか対応していないため。透過部分は黒くなる)。
 デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残るが、画像以外が
@@ -138,9 +139,10 @@ APK は **GitHub Actions が本 repo のソースからビルドして署名**�
 sha256sum -c grouppins-photo-bridge-<version>.apk.sha256
 ```
 
-CI は APK を公開する前に、署名が有効で登録済みの鍵 (`RELEASE_CERT_SHA256`) によるもので
-あることと、`INTERNET` 権限が含まれないことを検証しており、どれかが崩れるとリリース自体が
-失敗する。署名者の証明書 SHA-256 は各リリースのノートに載せており、
+CI は APK を公開する前に、単体テストと lint が通ることと、署名が有効で登録済みの鍵
+(`RELEASE_CERT_SHA256`) によるものであることと、`INTERNET` 権限が含まれないことを検証しており、
+どれかが崩れるとリリース自体が失敗する。`INTERNET` の検査は push と pull request の
+CI (debug APK) でも同じスクリプトで走る。署名者の証明書 SHA-256 は各リリースのノートに載せており、
 `apksigner verify --print-certs` で手元の APK と突き合わせられる。ビルドの実行ログも
 各リリースのノートからたどれる。
 
@@ -235,16 +237,24 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - クラウドのみの写真 (端末に実体が無い) は、開くのに全体のダウンロードが必要で
   事前判別もできないため、開くのを 5 秒で打ち切って「クラウドのみの写真のため読み込めませんでした」
   (複数枚なら部分読み込みトースト) を出す。一度打ち切った写真は同じ処理の中で開き直さず、
-  待ち時間の合計が 30 秒を超えたら以降の打ち切りは 1 秒に短縮する。この打ち切りは open
-  (`openFileDescriptor`) に掛かるもので、open は即座に返して読み取りで止まる provider には
-  効かない。読み込み中は透明な画面のまま (進捗表示は無い) で、Back で中断できる
+  待ち時間の合計が 30 秒を超えたら以降の打ち切りは 1 秒に短縮する。予算は 1 回の処理を通して
+  引き継ぐので、写真経路から座標のみ経路へ落ちても同じ写真をもう一度待つことはない。この
+  打ち切りは open (`openFileDescriptor`) に掛かるもので、open は即座に返して読み取りで止まる
+  provider には効かない。`MediaStore.getMediaUri()` は `CancellationSignal` を受け取らないため
+  中断できず、そこで待った時間は open の締切と予算から差し引くだけになる。読み込み中は透明な
+  画面のまま (進捗表示は無い) で、Back で中断できる
 - GPS 付きの原本 (`setRequireOriginal`) を開けなかった写真は、GPS を消した読み取りで代替せずに
   除外する。選んだ写真が全部これに当たると「GPS 付きの元写真を開けませんでした」を出す。
   写真へのアクセスが「一部のみ」のときに起きる
-- 複数枚を選んで一部しか処理できなかったときは「N 枚中 M 枚を読み込みました」のトーストを出す
-  (黙って落とさない)
-- GroupPins (PWA) 側の受け口は URL パラメータ (`photo_lat` / `photo_batch` /
-  `shared_photos`) と Web Share Target (POST `/share-target`)
+- 複数枚を選んで一部しか処理できなかったときは「N 枚中 M 枚」のトーストを出す (黙って落とさない)。
+  文言は経路ごとに別で、写真を渡す経路 (`msg_partial_load`) が除外するのは読み取れない写真・
+  クラウドのみの写真・上限超過分だけ、座標のみ経路 (`msg_partial_coords`) はそれに GPS の無い
+  写真を加える。写真経路は GPS の無い写真もコピーして渡し、除外するのは PWA 側なので分けている
+- GroupPins (PWA) 側の受け口は URL パラメータ (`photo_batch` / `photo_lat` /
+  `shared_photos`) と Web Share Target (POST `/share-target`)。このアプリが使うのは
+  `photo_batch` と Web Share Target の 2 つ。`photo_lat` は使わなくなったが、**PWA 側の受け口は
+  消せない**: v1.0.0 の APK は 1 枚のとき `photo_lat` を送るため、更新していない端末が残っている
+  間は受け続ける必要がある (加えて PWA 側で iOS ショートカット用の入口にもなっている)
 - 一度に取り込める写真の上限 (`PhotoBridge.kt` の `MAX_PHOTOS`) は PWA 側の上限
   (`map.tsx` の `MAX_BATCH_PHOTOS`) と揃える必要がある。片方だけ変えると超過分が黙って落ちる
 - cache コピー (`cache/shared/`) は次回起動時に 24h 超過分を自動削除する
@@ -262,7 +272,11 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - `android:launchMode="singleTop"` は、処理中に Home で離脱したユーザーが GroupPins から
   もう一度カメラボタンを押したときに、新しいインスタンスを積まずに `onNewIntent` へ回すため。
   積むと、放棄されたバッチの共有 intent が新しいバッチの後から発火して二重に取り込まれる。
-  `onNewIntent` は保留中の配送 (`whenResumed`) を捨ててから選び直しを始める
+  `onNewIntent` は保留中の配送 (`whenResumed`) を捨ててから選び直しを始めるが、それだけでは
+  足りない。ワーカーは取り消せないので、`onNewIntent` の時点でまだ走っているバッチの結果が
+  後から届く。`whenResumed` は 1 つしか持てないため、その古い結果が選び直しの `startPicking`
+  を上書きし、放棄したバッチが新しい選択の代わりに配送されてしまう。そのため
+  `processingGeneration` を持ち、`whenResumed` に入れる前に世代番号で古い結果を捨てる
 - `BitmapFactory.decodeStream` は `inJustDecodeBounds = true` のとき仕様上必ず null を
   返す。戻り値で成否を判定してはならず、直後の `outWidth` / `outHeight` で判定する
 - Activity が復元される (`savedInstanceState` あり) のは、権限ダイアログや SAF の裏で
@@ -277,9 +291,11 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   バックグラウンドからの起動は例外を投げずに無言で捨てられるため、読み込み中に
   他アプリへ切り替えられていたら `onResume` まで遅延する
 - 権限ダイアログが中断されると `grantResults` が空で返る。これは拒否ではないので、設定画面へ
-  誘導せず「許可されませんでした」で終了する
+  誘導せず「許可されませんでした」で終了する。ただしこの判定は**付与状況を見た後**に行う。
+  中断されても必要な権限が全て付与されていれば (同一グループの同時付与など) そのまま
+  ピッカーへ進む
 - 権限結果の判定は `requiredPermissions()` の全件が付与されたかで行う (`grantResults` の
-  配列は見ない)。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
+  配列は「拒否か中断か」を分けるためだけに見る)。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
   起動のたびに再要求する。部分許可からの拡張は `READ_MEDIA_IMAGES` の明示的な再要求でしか
   起きないため、`READ_MEDIA_VISUAL_USER_SELECTED` が付いていても要求を省かない
   (宣言自体を外すと Android 14 は compatibility mode になり、セッション限りの一時付与と
@@ -291,12 +307,18 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   返し、ref の比較も `equals("N")` の大文字固定なので、小文字 ref や ref 無しの写真の GPS を
   落とす。一方で値の有限性も範囲も検査しないため `0/0` は NaN のまま返る。PWA 側
   (`utils/exif.ts`) は ref 欠落を正、大文字化して比較、`(0,0)` と範囲外を除外するので、
-  読み取りの可否をそちらに揃えてある
+  ref と `(0,0)` と範囲の扱いはそちらに揃えてある。**分母 0 だけは意図して PWA より厳しい**:
+  PWA の `readGpsCoord` は分母 0 の成分を 0 として計算を続けるが、`35/1,30/0,0/1` のような値で
+  分を 0 にすると最大 30 分角 (約 55km) ずれた座標を地図に置くことになるため、橋渡し側は
+  座標全体を棄却して「GPS 無し」として扱う (`aSingleZeroDenominatorRejectsTheWholeCoordinate`)
 - EXIF の撮影日時は `Date` を経由せず文字列として `"yyyy:MM:dd HH:mm:ss"` →
   `"yyyy-MM-ddTHH:mm:ss"` に変換する (`PhotoBridge.isoTimeOf`)。EXIF の日時は TZ を持たない
   壁時計値で、PWA も naive として扱う。`SimpleDateFormat` で parse / format すると端末 TZ の
   夏時間ギャップに当たる時刻が 1 時間ずれる (`isLenient = false` はフィールドの範囲しか
-  検査せず、存在しない時刻を繰り上げる)
+  検査せず、存在しない時刻を繰り上げる)。ただし暦の実在検証は `LocalDate.of` で別に行う。
+  月と日を独立に範囲で見るだけでは `2024:02:31` が通り、親の `map.tsx` は
+  `new Date("2024-02-31T00:00:00")` を 3/2 として有効値にしてしまうため、存在しない日付が
+  滞在記録の時刻候補になる (`datesThatDoNotExistOnTheCalendarAreRejected`)
 - 縮小コピーは常に JPEG で書く。PWA の `utils/exif.ts` は JPEG (SOI) のみ対応で、PNG は
   GPS の有無に関わらず「読み取れない」として一括記録から除外されるため、透過を保つ意味が無い
 - 縮小コピーの長辺上限 `SHARE_MAX_DIM` (4096) は GroupPins の `photo_quality` の最大段 (4096px) に
@@ -313,8 +335,10 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   プロセス強制終了) で決まる。native の確保に失敗すると `decodeStream` は例外ではなく null を返すため、
   bounds が読めた (対応形式の) 写真で本デコードが null なら原本コピーへ落とさず除外する (`IOException`)。
   `createBitmap` 側の失敗は `OutOfMemoryError` として写真単位で捕捉する
-- EXIF の向きは、縮小する写真ではピクセルに焼き込み、縮小しない写真では同じ大きさの Bitmap を
-  もう 1 枚作らずに `Orientation` タグを書き戻して伝える。Chrome の `<img>` と
+- EXIF の向きは、`createBitmap` で縮める写真 (`scale < 1f`) ではピクセルに焼き込み、そのまま
+  書き出す写真では同じ大きさの Bitmap をもう 1 枚作らずに `Orientation` タグを書き戻して伝える。
+  分岐は「`inSampleSize` の後にまだ 4096px を超えているか」で決まるので、8000x6000 のように
+  サンプルだけで 4000px に収まった写真はタグ側になる。Chrome の `<img>` と
   `createImageBitmap` (既定の `imageOrientation` = `from-image`) は JPEG の EXIF の向きを適用する。
   PWA 側は `exif.ts` で GPS と日時しか読まず自前の回転はしないので二重回転にならない
 - `BitmapFactory` の `inScaled` / `inDensity` や `ImageDecoder.setTargetSize` では峰メモリは下がらない。
@@ -334,3 +358,7 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - 単体テスト (`app/src/test`) の対象は Android 実行時に依存しない純粋関数だけ
   (`coordinatesOf` / `isoTimeOf`)。`gradle testDebugUnitTest` で回り、CI (`.github/workflows/ci.yml`)
   が push と pull request のたびに `assembleDebug` / `testDebugUnitTest` / `lintDebug` を実行する
+- `INTERNET` 権限の不在の検査は `.github/scripts/verify-apk.sh` に置き、ci (debug APK) と
+  release (署名済み APK) の両方から呼ぶ。release だけで検査すると、主張が崩れたことに気付くのが
+  タグを打った後になる。release は署名鍵を復号する前にテストと lint も通す (ci はタグ push でも
+  走るが、release がそれに依存していないため、ここで通さないと赤いコミットの APK が公開される)

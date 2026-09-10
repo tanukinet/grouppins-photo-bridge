@@ -13,5 +13,6 @@
     <string name="err_interrupted">写真の処理が 2 回続けて中断されました (端末のメモリ不足の可能性があります。枚数を減らして試してください)</string>
     <string name="err_no_picker">写真を選ぶ画面を開けませんでした (ファイル選択アプリが無効になっていないか確認してください)</string>
     <string name="msg_loading">写真を読み込んでいます…</string>
-    <string name="msg_partial_load">%1$d 枚中 %2$d 枚を読み込みました (GPS のない写真・読み取れない写真・クラウドのみの写真・上限超過分は除外)</string>
+    <string name="msg_partial_load">%1$d 枚中 %2$d 枚を読み込みました (読み取れない写真・クラウドのみの写真・上限超過分は除外)</string>
+    <string name="msg_partial_coords">%1$d 枚中 %2$d 枚の位置情報を読み込みました (GPS のない写真・読み取れない写真・クラウドのみの写真・上限超過分は除外)</string>
 </resources>

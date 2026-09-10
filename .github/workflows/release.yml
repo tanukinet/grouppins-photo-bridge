@@ -41,6 +41,11 @@ jobs:
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
+      # 署名鍵を復号する前にテストと lint を通す。ci workflow はタグ push でも走るが
+      # release はそれに依存していないため、ここで通さないと赤いコミットの APK が公開される
+      - name: Test and lint
+        run: gradle testDebugUnitTest lintDebug --no-daemon
+
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -92,16 +97,7 @@ jobs:
             exit 1
           fi
           echo "CERT_SHA256=$ACTUAL" >> "$GITHUB_ENV"
-          PERMS=$("$ANDROID_HOME/build-tools/35.0.0/aapt2" dump permissions "$APK")
-          if ! grep -qx "package: com.grouppins.photobridge" <<< "$PERMS"; then
-            echo "aapt2 の出力に package 行が無く、権限を検査できていません:" >&2
-            printf '%s\n' "$PERMS" >&2
-            exit 1
-          fi
-          if grep -q "android.permission.INTERNET" <<< "$PERMS"; then
-            echo "INTERNET 権限が APK に含まれています" >&2
-            exit 1
-          fi
+          .github/scripts/verify-apk.sh "$APK"
 
       - name: Package artifacts
         run: |

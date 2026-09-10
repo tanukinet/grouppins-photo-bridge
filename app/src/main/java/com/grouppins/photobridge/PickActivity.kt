@@ -24,6 +24,7 @@ class PickActivity : Activity() {
     private var awaitingResult = false
     private var processingUris: ArrayList<Uri>? = null
     private var processingRetried = false
+    private var processingGeneration = 0
     private var resumed = false
     private var whenResumed: (() -> Unit)? = null
 
@@ -53,9 +54,11 @@ class PickActivity : Activity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (whenResumed != null) {
-            Log.w(TAG, "dropping ${processingUris?.size ?: 0} photo(s) abandoned before this request")
+        val abandoned = processingUris?.size ?: 0
+        if (abandoned > 0 || whenResumed != null) {
+            Log.w(TAG, "dropping $abandoned photo(s) abandoned before this request")
         }
+        processingGeneration++
         whenResumed = null
         awaitingResult = false
         processingUris = null
@@ -133,8 +136,8 @@ class PickActivity : Activity() {
         awaitingResult = false
         val denied = requiredPermissions().filterNot(::granted)
         when {
-            grantResults.isEmpty() -> fail(R.string.err_no_permission)
             denied.isEmpty() -> launchPicker()
+            grantResults.isEmpty() -> fail(R.string.err_no_permission)
             else -> fail(PhotoBridge.onPermissionDenied(this, denied))
         }
     }
@@ -174,19 +177,29 @@ class PickActivity : Activity() {
 
     private fun startProcessing(uris: List<Uri>) {
         processingUris = ArrayList(uris)
-        PhotoBridge.deliverAsync(this, uris, ::deliver)
+        val generation = ++processingGeneration
+        PhotoBridge.deliverAsync(this, uris) { deliver(generation, it) }
     }
 
-    private fun deliver(outcome: PhotoBridge.Outcome) = runWhenResumed {
-        processingUris = null
-        when (outcome) {
-            is PhotoBridge.Outcome.Error -> fail(outcome.messageRes)
-            is PhotoBridge.Outcome.Launch -> {
-                outcome.notice?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
-                PhotoBridge.launch(this, outcome.intent, outcome.failureRes)?.let {
-                    Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+    // ワーカーは取り消せないので、放棄されたバッチの結果が後から届く。世代番号が合わない結果は
+    // whenResumed に入れる前に捨てる (入れてしまうと選び直しの startPicking を上書きし、
+    // 放棄したバッチが新しい選択の代わりに配送される)
+    private fun deliver(generation: Int, outcome: PhotoBridge.Outcome) {
+        if (generation != processingGeneration) {
+            Log.w(TAG, "dropping the outcome of an abandoned batch (generation $generation)")
+            return
+        }
+        runWhenResumed {
+            processingUris = null
+            when (outcome) {
+                is PhotoBridge.Outcome.Error -> fail(outcome.messageRes)
+                is PhotoBridge.Outcome.Launch -> {
+                    outcome.notice?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+                    PhotoBridge.launch(this, outcome.intent, outcome.failureRes)?.let {
+                        Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+                    }
+                    finish()
                 }
-                finish()
             }
         }
     }
