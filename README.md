@@ -352,6 +352,18 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   だけで行う。`image/*` で探すと `image/jpeg` しか受けないフィルタにも一致してしまうため、
   ワイルドカードでは解決しない。画像以外 (デコード不能で原本コピーになった `.bin` など) が
   混ざった場合は直接共有せず座標のみ URL へ落とす
+- **コピー前の早期ゲートが `SEND` と `SEND_MULTIPLE` の候補を 1 つの集合に混ぜているのは正しい。**
+  「片方の action しか宣言しない WebAPK では、全枚数コピーした後で `find` が null になって
+  無駄になる」という指摘が繰り返し出るが、その状態は作れない。Chromium の WebAPK テンプレート
+  (`chrome/android/webapk/shell_apk/AndroidManifest.xml`、`{{#share_template}}` の節) は、
+  share target がファイルを受け取り files パラメータが空でないとき、**同一の intent-filter の中に**
+  `SEND` と `SEND_MULTIPLE` を並べ、`<data android:mimeType>` もその filter で共有する。
+  つまり片方の action だけが `image/*` に一致する状態にならない。GroupPins の
+  `manifest.webmanifest` は `files: [{ name: "photos", accept: ["image/*"] }]` を宣言しているので
+  この分岐に入る。仮に PWA 側を text 専用の share target に変えると `text/plain` だけの filter に
+  なるが、その場合はゲート自身が `image/*` で探して空集合になり、コピー前に座標のみ URL へ落ちる。
+  action ごとにゲートを分けるコードを足しても到達しない。Chrome がテンプレートを変えた場合の
+  検知は `deliverAsync` の `Log.w` (「WebAPK does not accept …」) が担う
 - 縮小コピーの作成は 1 枚につき原本を 1 度だけ開き (`PhotoBridge.PhotoSource`)、EXIF・bounds・
   デコードの前に `lseek(0)` で巻き戻して同じ fd を読み直す。パイプなど巻き戻せない fd の
   provider では従来どおり読み取りごとに開き直す (打ち切りとタイムアウト予算はその開き直しにも掛かる)
