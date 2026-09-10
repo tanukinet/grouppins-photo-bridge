@@ -1,0 +1,144 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/android-build-env
+
+      - name: Resolve version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+            if ! [[ "$VERSION_NAME" =~ ^([0-9]{1,4})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+              echo "タグは vX.Y.Z 形式にしてください (X は 4 桁、Y / Z は 3 桁まで。受け取った値: $GITHUB_REF_NAME)" >&2
+              exit 1
+            fi
+            MAJOR=${BASH_REMATCH[1]}; MINOR=${BASH_REMATCH[2]}; PATCH=${BASH_REMATCH[3]}
+            if [ "$((10#$MAJOR))" -lt 1 ] || [ "$((10#$MAJOR))" -gt 2099 ]; then
+              echo "X は 1 以上 2099 以下にしてください (0 だと dev ビルドの versionCode を下回る、2100 以上は versionCode に収まらない。受け取った値: $GITHUB_REF_NAME)" >&2
+              exit 1
+            fi
+            VERSION_CODE=$((10#$MAJOR * 1000000 + 10#$MINOR * 1000 + 10#$PATCH))
+          else
+            VERSION_NAME="0.0.0-dev.${{ github.run_number }}"
+            VERSION_CODE=${{ github.run_number }}
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
+      # 署名鍵を復号する前にテストと lint を通す。ci workflow はタグ push でも走るが
+      # release はそれに依存していないため、ここで通さないと赤いコミットの APK が公開される
+      - name: Test and lint
+        run: gradle testDebugUnitTest lintDebug --no-daemon
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "secrets.$name が未設定です (署名に必要な 4 つを全て登録してください)" >&2
+              exit 1
+            fi
+          done
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build release APK
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Verify APK
+        env:
+          RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose "$APK"
+          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+          ACTUAL=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "$CERTS" | tr -d '[:space:]' | tr 'A-F' 'a-f')
+          if [ -z "$ACTUAL" ]; then
+            echo "apksigner の出力から署名者の SHA-256 を読めませんでした:" >&2
+            printf '%s\n' "$CERTS" >&2
+            exit 1
+          fi
+          EXPECTED=$(tr -d ':[:space:]' <<< "$RELEASE_CERT_SHA256" | tr 'A-F' 'a-f')
+          if [ -z "$EXPECTED" ]; then
+            echo "vars.RELEASE_CERT_SHA256 が未設定です (README「リリースを出す」の手順で登録してください)" >&2
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "署名者が登録済みの鍵と一致しません (APK: $ACTUAL / 登録: $EXPECTED)" >&2
+            exit 1
+          fi
+          echo "CERT_SHA256=$ACTUAL" >> "$GITHUB_ENV"
+          .github/scripts/verify-apk.sh "$APK"
+
+      - name: Package artifacts
+        run: |
+          NAME="grouppins-photo-bridge-${VERSION_NAME}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$NAME"
+          sha256sum "$NAME" > "$NAME.sha256"
+          echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apk-${{ env.VERSION_NAME }}
+          path: |
+            ${{ env.APK_NAME }}
+            ${{ env.APK_NAME }}.sha256
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "このリリースの APK は GitHub Actions が本 repo のソースからビルドしたものです。"
+            echo "実行ログ: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            cat "${APK_NAME}.sha256"
+            echo '```'
+            echo
+            echo "署名者の証明書 SHA-256: \`${CERT_SHA256}\`"
+            echo
+            echo "ビルド時に APK の署名が登録済みの鍵によるものであることと、INTERNET 権限の不在を"
+            echo "検証しています (workflow の Verify APK ステップ)。手元でも確認できます:"
+            echo
+            echo '```'
+            echo "sha256sum -c ${APK_NAME}.sha256"
+            echo "\$ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs ${APK_NAME}"
+            echo "\$ANDROID_HOME/build-tools/35.0.0/aapt2 dump permissions ${APK_NAME}"
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            "$APK_NAME" "${APK_NAME}.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md
