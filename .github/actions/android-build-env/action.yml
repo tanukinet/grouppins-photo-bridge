@@ -12,7 +12,12 @@ runs:
     - name: Install Android SDK packages
       shell: bash
       run: |
+        # composite action の bash は -o pipefail 付きで動くため、sdkmanager が入力を
+        # 読み終えた時点で yes が SIGPIPE で落ちるとパイプライン全体が失敗する。
+        # ライセンス同意の間だけ pipefail を外し、sdkmanager 自身の終了状態は -e で見る
+        set +o pipefail
         yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+        set -o pipefail
         "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
 
     - name: Install Gradle 8.7
