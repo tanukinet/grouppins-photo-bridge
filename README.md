@@ -1,22 +1,18 @@
 # GroupPins 写真取込 (Android 橋渡しアプリ)
 
-写真の共有を受けて GPS と撮影時刻を抽出し、GroupPins (PWA) のマップ画面を
-`https://grouppins.com/?photo_lat=..&photo_lng=..&photo_time=..` で開くだけの
-UI なしミニアプリ。
+GroupPins (PWA) のマップ画面のカメラボタンから呼ばれ、選ばれた写真を GPS 付きのまま
+GroupPins へ渡して戻るだけの、UI なしミニアプリ。入口は 1 つ (`grouppins-photo://pick`)
+だけで、GroupPins 以外から呼ばれる経路も、GroupPins 以外へ写真を渡す経路も持たない。
 
 ## このアプリは通信しない
 
 写真と位置情報という強い権限を要求するアプリなので、何ができないかを先に書く。
 
-- このアプリがすることは、**写真の EXIF から GPS と撮影時刻を読む**ことと、読んだ結果や
-  写真そのものを **ユーザーがその場で選んだ相手へ渡す**ことだけで、それ以外の出口を持たない。
-  写真が出ていく経路は [使い方](#使い方) の経路 0 / 1 / 2 の 3 つで、どれもユーザーの操作
-  (写真を選ぶ・共有先を選ぶ・ファイル選択で本アプリを選ぶ) が無ければ何も出ない
 - **`INTERNET` 権限を宣言していない** ([AndroidManifest.xml](app/src/main/AndroidManifest.xml))。
   Android は未宣言のアプリからの通信を OS が拒否するため、写真も位置情報も
   どこかへ送信すること自体ができない
 - ネットワーク系の API (`java.net` / `HttpURLConnection` / WebView 等) を
-  1 つも import していない。Kotlin 6 ファイル・約 1,400 行で全部読める
+  1 つも import していない。Kotlin 2 ファイル・約 800 行で全部読める
 - 直接の依存ライブラリは `androidx.exifinterface` (EXIF 読み取り) と `androidx.core`
   (FileProvider) の 2 つだけ。推移的に入るのは AndroidX の基盤ライブラリ (annotation /
   collection / concurrent-futures / lifecycle / profileinstaller / startup / tracing ほか)、
@@ -24,17 +20,15 @@ UI なしミニアプリ。
   (インターフェース 1 つだけの stub)、`org.jetbrains:annotations` で、解析ツール・広告 SDK・
   クラッシュレポーターの類は無い
   (`gradle :app:dependencies --configuration releaseRuntimeClasspath` で全一覧が出る)
-- 写真が渡る先は、ユーザーがその場で選んだ相手だけ。経路 0 は署名検証済みの GroupPins の
-  WebAPK、経路 2 は共有シートで選んだアプリ、経路 1 は **ファイル選択で「GroupPins 写真取込」を
-  選んだ任意のアプリ** で、経路 1 では本来 `ACCESS_MEDIA_LOCATION` を持たないアプリにも
-  ユーザーの選択を条件に GPS EXIF 付きの原本が渡る。端末外への送信は受け取ったアプリが行う
-- 共有シートから受け取った写真 (ShareActivity) は、共有元が読み取り許可 (URI grant) を
-  付けて渡したものだけを開く。自アプリの写真アクセス権限で、他アプリが指定した任意の
-  写真を開くことはしない
-- 共有シートを出さずに写真を直接渡す経路 (経路 0) では、渡す相手が **Chrome の WebAPK
-  minting サーバーの署名鍵で署名されている**ことを検証してから渡す
-  (`PhotoBridge.WEBAPK_SIGNER_CERT_SHA256`)。`org.chromium.webapk.*` というパッケージ名と
-  meta-data は誰でも名乗れるため、名前だけを信じて写真を渡さない。
+- **外部に公開しているコンポーネントは `PickActivity` 1 つだけ**で、受け付けるのは
+  `grouppins-photo://pick` の起動だけ。共有シートにも、ファイル選択の提供元一覧にも現れない。
+  写真の出口は [使い方](#使い方) の 2 つ (署名検証済みの GroupPins WebAPK へ直接共有するか、
+  座標だけを URL でブラウザへ渡すか) しかなく、どちらもユーザーが自分で写真を選ばなければ
+  何も出ない
+- 共有シートを出さずに写真を直接渡すため、渡す相手が **Chrome の WebAPK minting サーバーの
+  署名鍵で署名されている**ことと、その WebAPK が `grouppins.com` を名乗っていることを
+  検証してから渡す (`PhotoBridge.WEBAPK_SIGNER_CERT_SHA256`)。`org.chromium.webapk.*` という
+  パッケージ名と meta-data は誰でも名乗れるため、名前だけを信じて写真を渡さない。
   検証に通らなければ写真は渡さず、座標のみの URL 経路へ落ちる。
   座標のみの URL は通常のブラウザ起動 (暗黙の `ACTION_VIEW`) で、受け取り先の検証はしない。
   Android 12 以降は OS が検証済みアプリとブラウザにしか web intent を渡さないが、
@@ -81,7 +75,8 @@ $ANDROID_HOME/build-tools/35.0.0/aapt2 dump xmltree --file AndroidManifest.xml \
   | grep -E 'E: (activity|provider|receiver|service)|android:(name|exported|permission)\('
 ```
 
-ソースの manifest にある 3 つの Activity と 2 つの provider のほかに、以下の 2 つが
+ソースの manifest にあるのは `PickActivity` (exported=true) と `FileProvider`
+(exported=false) の 2 つだけで、ほかに以下の 2 つが
 `androidx.core` → `androidx.lifecycle` → `androidx.profileinstaller` 経由でマージされる。
 
 | コンポーネント | exported | 内容 |
@@ -94,56 +89,38 @@ $ANDROID_HOME/build-tools/35.0.0/aapt2 dump xmltree --file AndroidManifest.xml \
 Android 10 以降、`ACCESS_MEDIA_LOCATION` 権限を持たないアプリ (= Chrome / Web アプリ全般) が
 端末内の写真を読むと、OS が GPS EXIF を削除してから渡す。そのため PWA 側では
 写真から位置情報を取得できない (フォトピッカー・ファイルアプリ・共有シートすべて対象)。
-権限を持てるネイティブ側で `MediaStore.setRequireOriginal()` を通して読み取り、
-URL パラメータで PWA へ渡すのがこのアプリの役割。
+権限を持てるネイティブ側で `MediaStore.setRequireOriginal()` を通して原本を読み、
+GPS と撮影日時を書き戻したコピーを PWA へ渡すのがこのアプリの役割。
 
 ## 使い方
 
-**初回セットアップ**: ランチャーから「GroupPins 写真取込」を一度起動し、権限
-(メディアの位置情報 + 写真へのアクセス) を許可する。DocumentsProvider (経路 1) は
-自分で権限を要求できないため、この初回起動が必須。写真へのアクセスは **「すべて許可」が
-必要**で、Android 14 以降の「写真を選択」(一部のみ) は権限不足として扱い、経路 0 / 2 とも
-ピッカーを開かずに終了する (部分許可のままでは経路 1 の一覧が選んだ写真だけになり、経路 0 / 2 でも
-選択外の写真の GPS を読めないため)。ランチャーか経路 0 でもう一度起動すると選び直せる。
+インストール後の操作はすべて GroupPins 側から始まる。**ランチャーにアイコンは出ない**
+(`MAIN` / `LAUNCHER` の入口を持たない)。アンインストールは端末の設定 → アプリから行う。
 
-**経路 0 (推奨). マップ画面のカメラボタン → 自動で写真ごと戻る**:
-1. GroupPins のカメラボタン → intent URL (`grouppins-photo://pick`) でこのアプリが開く
-2. 写真を選ぶと、**GroupPins の WebAPK (インストール済み PWA) の share Activity へ
-   写真ごと直接共有**して自動で戻る (共有シートは出ない)。受け取りは経路 2 と同じ
-   Web Share Target (`/?shared_photos=`)。渡す写真の中身は経路 2 と同じ縮小コピー
-3. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) と、WebAPK の
-   Web Share Target が実際に渡す枚数・形式 (単一 / 複数、JPEG / PNG) を受け付けない場合は、
-   従来の座標のみ URL (`?photo_lat=` / `?photo_batch=`) へ自動フォールバック
+1. GroupPins のマップ画面でカメラボタンを押すと、intent URL (`grouppins-photo://pick`) で
+   このアプリが開く
+2. 初回はここで権限 (メディアの位置情報 + 写真へのアクセス) を要求する。写真へのアクセスは
+   **「すべて許可」が必要**で、Android 14 以降の「写真を選択」(一部のみ) は権限不足として扱い、
+   ピッカーを開かずに終了する (部分許可では選択外の写真の GPS を読めないため)。
+   カメラボタンをもう一度押すと選び直せる
+3. ファイル選択 (SAF) で写真を選ぶ (複数可、上限 50 枚)
+4. 写真の縮小コピーを cache に作り、**GroupPins の WebAPK (インストール済み PWA) の
+   share Activity へ写真ごと直接共有**して自動で戻る (共有シートは出ない)。
+   受け取りは PWA の Web Share Target (`/?shared_photos=`)
+5. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) と、WebAPK が実際に渡す
+   枚数・形式を受け付けない場合は、座標のみの URL (`?photo_lat=` / `?photo_batch=`) を
+   ブラウザで開く経路へ自動フォールバックする
 
-**経路 1. ファイル選択で「GroupPins 写真取込」を選ぶ (DocumentsProvider)**:
-1. ブラウザの任意のファイル選択 (写真を添付する箇所など) を開く
-2. 提供元 (サイドバー / ブラウズ) から **「GroupPins 写真取込」** を選ぶ
-3. 端末ローカルの写真一覧 (新しい順) から選択 → **GPS 付き原本**がブラウザに渡り、
-   位置判定と写真添付が 1 回の選択で完結する
-   (標準の「最近」やフォトピッカーから選ぶと OS が GPS を削除するので注意)
-4. 権限が足りないときは黙って劣化させず失敗する。「写真へのアクセス」が無いと一覧の
-   読み込みがエラーになり、「メディアの位置情報」が無いと (GPS を消した写真を代わりに
-   渡さずに) 写真を開けない。どちらもランチャーからアプリを起動して権限を許可し直せば直る
-   (「一部のみ」の部分許可も同じ扱いで、ランチャー起動時の権限ダイアログで「すべて許可」へ
-   切り替えられる)
-
-**経路 2. アプリを起動して GroupPins へ送る**:
-1. ランチャーから「GroupPins 写真取込」を起動 → 写真を選択 (複数可)
-2. 写真の縮小コピーを cache に作って共有シートが開くので **GroupPins** を選ぶ。
-   コピーは長辺 4096px を上限に縮小した JPEG (品質 85。4096px 以下の写真は縮小せず再エンコードだけ)
-   で、EXIF は GPS と日時タグ (`DateTimeOriginal` = 撮影日時、`DateTime` = 更新日時) を
-   **原本にあるものだけ** 書き戻す (機種名・メーカーノート等は落ちる。原本に無い撮影日時を
-   更新日時から作ることはしない)。向きは縮小した写真と透過 PNG ではピクセルに焼き込み、縮小しない
-   JPEG では `Orientation` タグで伝える。透過を持つ PNG は PNG のまま縮小する。上限の 4096px は
-   GroupPins の保存画質の最大段に合わせた値で、プランごとの縮小は PWA とサーバーが行う。
-   デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残る)。
-   EXIF を読めない・書き戻せない写真や、GPS 付きの原本を開けない写真は原本で代替せずに
-   除外し、「N 枚中 M 枚」のトーストで知らせる
-3. PWA の Web Share Target (POST /share-target → service worker) が写真を受け取り、
-   位置判定 + 写真添付の既存フローへ流れる
-
-**旧経路 (後方互換で残置)**:
-- 共有シートから写真を「GroupPins 写真取込」へ共有 → 座標だけ URL で PWA へ (ShareActivity)
+渡すコピーは長辺 4096px を上限に縮小した **JPEG (品質 85)** で、4096px 以下の写真は縮小せず
+再エンコードだけ行う。EXIF は GPS と日時タグ (`DateTimeOriginal` = 撮影日時、`DateTime` =
+更新日時) を **原本にあるものだけ** 書き戻す (機種名・メーカーノート等は落ちる。原本に無い
+撮影日時を更新日時から作ることはしない)。向きは縮小した写真ではピクセルに焼き込み、縮小しない
+写真では `Orientation` タグで伝える。上限の 4096px は GroupPins の `photo_quality` の最大段に
+合わせた値で、プランごとの縮小は PWA とサーバーが行う。透過を持つ画像も JPEG になる
+(PWA の EXIF 読み取りが JPEG しか対応していないため。透過部分は黒くなる)。
+デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残るが、画像以外が
+混ざったバッチは直接共有せず座標のみ URL へ落ちる)。EXIF を読めない・書き戻せない写真や、
+GPS 付きの原本を開けない写真は原本で代替せずに除外し、「N 枚中 M 枚」のトーストで知らせる。
 
 ## 入手
 
@@ -249,10 +226,12 @@ debug ビルドの `versionCode` / `versionName` は 1 / 1.0 固定なので、�
 
 Play 配布は想定していない (Releases の APK を直接入れる)。
 
+
 ## 注意
 
 - 接続先 URL は `PhotoBridge.kt` の `TARGET_URL` にハードコードしている
-- 元写真に GPS が無い場合は「写真に位置情報がありません」のトーストを出して終了する
+- 元写真に GPS が無い場合、座標のみ URL の経路では「写真に位置情報がありません」を出して終了する。
+  写真を渡す経路ではコピー自体は作られ、GPS が無い写真は PWA 側の一括記録から除外される
 - クラウドのみの写真 (端末に実体が無い) は、開くのに全体のダウンロードが必要で
   事前判別もできないため、開くのを 5 秒で打ち切って「クラウドのみの写真のため読み込めませんでした」
   (複数枚なら部分読み込みトースト) を出す。一度打ち切った写真は同じ処理の中で開き直さず、
@@ -260,15 +239,15 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   (`openFileDescriptor`) に掛かるもので、open は即座に返して読み取りで止まる provider には
   効かない。読み込み中は透明な画面のまま (進捗表示は無い) で、Back で中断できる
 - GPS 付きの原本 (`setRequireOriginal`) を開けなかった写真は、GPS を消した読み取りで代替せずに
-  除外する (経路 1 の provider と同じ方針)。選んだ写真が全部これに当たると
-  「GPS 付きの元写真を開けませんでした」を出す。写真へのアクセスが「一部のみ」のときに起きる
-- 複数枚を選んで一部しか処理できなかったときは、どの経路でも「N 枚中 M 枚を読み込みました」の
-  トーストを出す (黙って落とさない)
+  除外する。選んだ写真が全部これに当たると「GPS 付きの元写真を開けませんでした」を出す。
+  写真へのアクセスが「一部のみ」のときに起きる
+- 複数枚を選んで一部しか処理できなかったときは「N 枚中 M 枚を読み込みました」のトーストを出す
+  (黙って落とさない)
 - GroupPins (PWA) 側の受け口は URL パラメータ (`photo_lat` / `photo_batch` /
   `shared_photos`) と Web Share Target (POST `/share-target`)
-- 一度に取り込める写真の上限 (`PhotoBridge.kt` の `MAX_PHOTOS`) は PWA 側の上限と
-  揃える必要がある。片方だけ変えると超過分が黙って落ちる
-- 経路 2 の cache コピー (`cache/shared/`) は次回起動時に 24h 超過分を自動削除する
+- 一度に取り込める写真の上限 (`PhotoBridge.kt` の `MAX_PHOTOS`) は PWA 側の上限
+  (`map.tsx` の `MAX_BATCH_PHOTOS`) と揃える必要がある。片方だけ変えると超過分が黙って落ちる
+- cache コピー (`cache/shared/`) は次回起動時に 24h 超過分を自動削除する
 
 ## 実装メモ (触るとき用)
 
@@ -279,7 +258,11 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   Chrome が正規に mint した WebAPK はすべてこの固定鍵で署名される
 - Activity に `android:noHistory` を付けてはいけない。権限ダイアログや SAF が前面に出た
   時点で Activity が破棄され、`onRequestPermissionsResult` / `onActivityResult` が
-  届かなくなる (全経路が自前の `finish()` で終了する)
+  届かなくなる (自前の `finish()` で終了するため)
+- `android:launchMode="singleTop"` は、処理中に Home で離脱したユーザーが GroupPins から
+  もう一度カメラボタンを押したときに、新しいインスタンスを積まずに `onNewIntent` へ回すため。
+  積むと、放棄されたバッチの共有 intent が新しいバッチの後から発火して二重に取り込まれる。
+  `onNewIntent` は保留中の配送 (`whenResumed`) を捨ててから選び直しを始める
 - `BitmapFactory.decodeStream` は `inJustDecodeBounds = true` のとき仕様上必ず null を
   返す。戻り値で成否を判定してはならず、直後の `outWidth` / `outHeight` で判定する
 - Activity が復元される (`savedInstanceState` あり) のは、権限ダイアログや SAF の裏で
@@ -287,52 +270,35 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   生かして結果を受け取り、処理中 (ワーカー実行中〜共有先の起動待ち) なら保存しておいた
   URI で処理をやり直し、どちらでもなければ即 `finish()` する (透明な画面が残るのを防ぐ)。
   待ち中に `finish()` すると届いた結果が捨てられ、処理中に `finish()` すると選んだ写真が
-  無言で消えるため、待ち状態と処理中の URI を `onSaveInstanceState` で保存している
-  (`BridgeActivity`)。やり直しの URI は自アプリが書いた Bundle 由来なので `ShareActivity` の
-  grant 検査は掛け直さない (grant が失効していれば開けずに失敗として現れる)。やり直しは 1 回まで
-  で、2 回目の復元では `err_interrupted` で終了する (LMK に殺され続ける写真で無限にやり直さない)
+  無言で消えるため、待ち状態と処理中の URI を `onSaveInstanceState` で保存している。
+  やり直しは 1 回までで、2 回目の復元では `err_interrupted` で終了する
+  (LMK に殺され続ける写真で無限にやり直さない)
 - 共有先の `startActivity` は Activity が resumed のときだけ行う。Android 10 以降、
   バックグラウンドからの起動は例外を投げずに無言で捨てられるため、読み込み中に
   他アプリへ切り替えられていたら `onResume` まで遅延する
-- `ShareActivity` の `checkUriPermission(uri, myPid, myUid, FLAG_GRANT_READ_URI_PERMISSION)` は
-  明示的な URI grant だけを見る (自アプリの `READ_MEDIA_IMAGES` は考慮されない)。共有元が
-  grant を付けずに `content://media/...` を投げてきた場合にこれが拒否になる
 - 権限ダイアログが中断されると `grantResults` が空で返る。これは拒否ではないので、設定画面へ
   誘導せず「許可されませんでした」で終了する
-- `MatrixCursor.RowBuilder.add(列名, 値)` は、カーソルに無い列名を黙って無視する
-  (javadoc に明記)。DocumentsProvider が呼び出し側の projection をそのまま列定義に使い、
-  全列を `add` して良いのはこのため
 - 権限結果の判定は `requiredPermissions()` の全件が付与されたかで行う (`grantResults` の
   配列は見ない)。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
-  ランチャーと経路 0 の起動のたびに再要求する。部分許可からの拡張は `READ_MEDIA_IMAGES` の
-  明示的な再要求でしか起きないため、`READ_MEDIA_VISUAL_USER_SELECTED` が付いていても要求を
-  省かない。SAF で選んだ写真を GPS 付きで開くには `MediaStore.getMediaUri()` で MediaStore の
-  URI に変換してから `setRequireOriginal()` で開く必要があり、そこで写真アクセス権限が要る。
-  `ShareActivity` だけは共有元の URI grant で開けるので `ACCESS_MEDIA_LOCATION` のみを要求する
-- `ShareActivity` の URI grant 検査は先頭 `MAX_PHOTOS` 件だけに掛ける。`PhotoBridge` も同じ
-  定数で先頭から処理するため、検査していない URI を開くことはない (上限は両者で共有する)
-- 経路 1 のフォルダ一覧は、MediaStore に「フォルダ」のテーブルが無いため写真行の `BUCKET_ID`
-  から作るしかない。Android 11 以降は `QUERY_ARG_SQL_GROUP_BY` でフォルダ数ぶんの行だけを
-  受け取り (各フォルダの更新日時は `LIMIT 1` の小クエリで別途取る)、`MediaStore.getGeneration()`
-  の世代番号が変わるまで作り直さない。Android 10 はどちらも無いので、全行を走査して
-  30 秒キャッシュする従来の形のまま。キャッシュのキーは (世代番号, 付与済みのメディア権限) で、
-  世代番号は MediaStore の行が変わったときしか上がらず権限を許可し直しても動かないため、
-  権限の状態をキーに含めて許可後に作り直す。空の一覧はキャッシュしない (権限不足やクエリ失敗の
-  結果を固定しないため)。作り直しはロックの中で行い、同時に来た binder スレッドは待つ
-- MediaProvider は写真アクセス権限が無いとき `SecurityException` を投げず、呼び出し元が所有する
-  行だけ (= 本アプリでは 0 行) を返す。「権限が無ければ一覧がエラーになる」は provider 側で
-  `checkSelfPermission` を見て自前で `SecurityException` を投げることで実現している
-  (`PhotosDocumentsProvider.requireMediaAccess`)。Android 14 の部分許可は一覧を出す (選んだ
-  写真のフォルダだけになる)
-- 経路 0 の WebAPK 解決は、`org.chromium.webapk.*` の候補を署名と meta-data で検証したパッケージ集合を
-  1 回の共有につき 1 度だけ作り、action / MIME ごとの解決はその集合に対する `queryIntentActivities`
-  だけで行う。コピー後の実 MIME が複数ある (JPEG と PNG の混在) ときは、全ての MIME が同じ
-  component で受かる場合だけ直接共有し、1 つでも受からなければ座標のみ URL へ落とす。`image/*` で
-  探すと `image/jpeg` しか受けないフィルタにも一致してしまうため、ワイルドカードでは解決しない。
-  画像以外 (デコード不能で原本コピーになった `.bin` など) が混ざった場合も直接共有しない
-- 縮小コピーの作成は 1 枚につき原本を 1 度だけ開き (`PhotoBridge.PhotoSource`)、EXIF・bounds・
-  デコードの前に `lseek(0)` で巻き戻して同じ fd を読み直す。パイプなど巻き戻せない fd の
-  provider では従来どおり読み取りごとに開き直す (打ち切りとタイムアウト予算はその開き直しにも掛かる)
+  起動のたびに再要求する。部分許可からの拡張は `READ_MEDIA_IMAGES` の明示的な再要求でしか
+  起きないため、`READ_MEDIA_VISUAL_USER_SELECTED` が付いていても要求を省かない
+  (宣言自体を外すと Android 14 は compatibility mode になり、セッション限りの一時付与と
+  ダイアログの再表示が繰り返されるので宣言は残す)。SAF で選んだ写真を GPS 付きで開くには
+  `MediaStore.getMediaUri()` で MediaStore の URI に変換してから `setRequireOriginal()` で
+  開く必要があり、そこで写真アクセス権限が要る
+- GPS は `ExifInterface.getLatLong()` を使わず `PhotoBridge.coordinatesOf` で自前に読む。
+  androidx 1.3.7 の `getLatLong()` は GPSLatitudeRef / GPSLongitudeRef が欠けていると null を
+  返し、ref の比較も `equals("N")` の大文字固定なので、小文字 ref や ref 無しの写真の GPS を
+  落とす。一方で値の有限性も範囲も検査しないため `0/0` は NaN のまま返る。PWA 側
+  (`utils/exif.ts`) は ref 欠落を正、大文字化して比較、`(0,0)` と範囲外を除外するので、
+  読み取りの可否をそちらに揃えてある
+- EXIF の撮影日時は `Date` を経由せず文字列として `"yyyy:MM:dd HH:mm:ss"` →
+  `"yyyy-MM-ddTHH:mm:ss"` に変換する (`PhotoBridge.isoTimeOf`)。EXIF の日時は TZ を持たない
+  壁時計値で、PWA も naive として扱う。`SimpleDateFormat` で parse / format すると端末 TZ の
+  夏時間ギャップに当たる時刻が 1 時間ずれる (`isLenient = false` はフィールドの範囲しか
+  検査せず、存在しない時刻を繰り上げる)
+- 縮小コピーは常に JPEG で書く。PWA の `utils/exif.ts` は JPEG (SOI) のみ対応で、PNG は
+  GPS の有無に関わらず「読み取れない」として一括記録から除外されるため、透過を保つ意味が無い
 - 縮小コピーの長辺上限 `SHARE_MAX_DIM` (4096) は GroupPins の `photo_quality` の最大段 (4096px) に
   合わせている。PWA は受け取った写真をプランの長辺へ canvas で再エンコードしてからアップロードする
   (小さく送ると画質が戻らないが、大きく送っても正本はサーバー側の縮小) ため、橋渡し側の上限は
@@ -347,21 +313,24 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   プロセス強制終了) で決まる。native の確保に失敗すると `decodeStream` は例外ではなく null を返すため、
   bounds が読めた (対応形式の) 写真で本デコードが null なら原本コピーへ落とさず除外する (`IOException`)。
   `createBitmap` 側の失敗は `OutOfMemoryError` として写真単位で捕捉する
-- EXIF の向きは、縮小する写真と透過 PNG では `createBitmap` でピクセルに焼き込み、縮小しない JPEG では
-  同じ大きさの Bitmap をもう 1 枚作らずに `Orientation` タグを書き戻して伝える。Chrome の `<img>` と
-  `createImageBitmap` (既定の `imageOrientation`) は JPEG の EXIF の向きを適用するが、PNG の `eXIf` は
-  Chromium の libpng 経路も Skia の `SkPngCodec` も読まないため、PNG は焼き込みに限る。PWA 側は
-  `exif.ts` で GPS と日時しか読まず自前の回転はしないので二重回転にならない
+- EXIF の向きは、縮小する写真ではピクセルに焼き込み、縮小しない写真では同じ大きさの Bitmap を
+  もう 1 枚作らずに `Orientation` タグを書き戻して伝える。Chrome の `<img>` と
+  `createImageBitmap` (既定の `imageOrientation` = `from-image`) は JPEG の EXIF の向きを適用する。
+  PWA 側は `exif.ts` で GPS と日時しか読まず自前の回転はしないので二重回転にならない
 - `BitmapFactory` の `inScaled` / `inDensity` や `ImageDecoder.setTargetSize` では峰メモリは下がらない。
   どちらもサンプル後サイズの Bitmap を全画素確保してから別 Bitmap へ canvas で縮小する (AOSP
   `BitmapFactory.cpp` の `doDecode`、hwui `ImageDecoder.cpp` の `decode` で確認)。`ImageDecoder` は
   EXIF の向きを無効化できずに自動適用するため、自前の回転と二重になる。libjpeg の N/8 スケーリングも
   Android の公開 API からは 1/2・1/4・1/8 しか選べない
 - 低 RAM 端末で `OutOfMemoryError` になった写真は 1 枚単位でスキップされ「N 枚中 M 枚」に現れる
-- 経路 1 の一覧 Cursor は通知 URI を root の子一覧 URI に固定し、provider が MediaStore の画像
-  URI を `ContentObserver` で監視して変更をその URI へ転送する。DocumentsUI は自 authority の
-  URI なら監視できるため、写真の追加・削除で開いたままの一覧が更新される (端末未実測)
-- Bundle 版 `queryChildDocuments` は `QUERY_ARG_SORT_COLUMNS` が 1 列で、その列を provider 側で
-  並べ替えられるときだけ `EXTRA_HONORED_ARGS` を申告する。申告が無いと DocumentsUI は受け取った
-  Cursor を毎回クライアント側で並べ替え直す (provider の並び順は `MAX_ITEMS` で切る範囲にしか効かない)。
-  `QUERY_ARG_SQL_SORT_ORDER` の生文字列や collation 指定は解釈するが申告しない
+- WebAPK の解決は、`org.chromium.webapk.*` の候補を署名と meta-data で検証したパッケージ集合を
+  1 回の共有につき 1 度だけ作り、action / MIME ごとの解決はその集合に対する `queryIntentActivities`
+  だけで行う。`image/*` で探すと `image/jpeg` しか受けないフィルタにも一致してしまうため、
+  ワイルドカードでは解決しない。画像以外 (デコード不能で原本コピーになった `.bin` など) が
+  混ざった場合は直接共有せず座標のみ URL へ落とす
+- 縮小コピーの作成は 1 枚につき原本を 1 度だけ開き (`PhotoBridge.PhotoSource`)、EXIF・bounds・
+  デコードの前に `lseek(0)` で巻き戻して同じ fd を読み直す。パイプなど巻き戻せない fd の
+  provider では従来どおり読み取りごとに開き直す (打ち切りとタイムアウト予算はその開き直しにも掛かる)
+- 単体テスト (`app/src/test`) の対象は Android 実行時に依存しない純粋関数だけ
+  (`coordinatesOf` / `isoTimeOf`)。`gradle testDebugUnitTest` で回り、CI (`.github/workflows/ci.yml`)
+  が push と pull request のたびに `assembleDebug` / `testDebugUnitTest` / `lintDebug` を実行する

@@ -32,12 +32,12 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
-import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 object PhotoBridge {
 
@@ -45,13 +45,13 @@ object PhotoBridge {
 
     private const val TARGET_URL = "https://grouppins.com/"
 
-    internal const val MAX_PHOTOS = 50
+    private const val MAX_PHOTOS = 50
 
     private const val OPEN_TIMEOUT_MS = 5_000L
     private const val OPEN_TIMEOUT_MIN_MS = 1_000L
     private const val OPEN_TIMEOUT_BUDGET_MS = 30_000L
 
-    internal const val CACHE_DIR = "shared"
+    private const val CACHE_DIR = "shared"
 
     private const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
 
@@ -61,6 +61,8 @@ object PhotoBridge {
 
     private const val WEBAPK_SIGNER_CERT_SHA256 =
         "f9a8f75a7f0b5d2ccae8c2b570855640e709995558cd9706af74b84e68962faa"
+
+    private val EXIF_DATE_TIME = Regex("""^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})""")
 
     private data class PhotoMeta(val lat: Double?, val lng: Double?, val time: String?)
 
@@ -73,7 +75,7 @@ object PhotoBridge {
         class Error(val messageRes: Int) : Outcome()
     }
 
-    internal class ExtractStats {
+    private class ExtractStats {
         var timedOut = 0
             private set
         var originalUnavailable = 0
@@ -102,10 +104,10 @@ object PhotoBridge {
         }
     }
 
-    internal fun openPreferOriginal(activity: Activity, uri: Uri, stats: ExtractStats): InputStream? =
+    private fun openPreferOriginal(activity: Activity, uri: Uri, stats: ExtractStats): InputStream? =
         openPreferOriginalFd(activity, uri, stats)?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
 
-    internal fun openPreferOriginalFd(activity: Activity, uri: Uri, stats: ExtractStats): ParcelFileDescriptor? {
+    private fun openPreferOriginalFd(activity: Activity, uri: Uri, stats: ExtractStats): ParcelFileDescriptor? {
         val timeoutMs = stats.openTimeoutMs(uri) ?: return null
         val mediaUri: Uri? = try {
             if (uri.authority == MediaStore.AUTHORITY) uri else MediaStore.getMediaUri(activity, uri)
@@ -155,7 +157,7 @@ object PhotoBridge {
         false
     }
 
-    internal class PhotoSource(
+    private class PhotoSource(
         private val activity: Activity,
         val uri: Uri,
         private val stats: ExtractStats,
@@ -180,23 +182,65 @@ object PhotoBridge {
         }
     }
 
+    private fun gpsOf(exif: ExifInterface): DoubleArray? = coordinatesOf(
+        exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE),
+        exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE_REF),
+        exif.getAttribute(ExifInterface.TAG_GPS_LONGITUDE),
+        exif.getAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF),
+    )
+
+    internal fun coordinatesOf(
+        latValue: String?,
+        latRef: String?,
+        lngValue: String?,
+        lngRef: String?,
+    ): DoubleArray? {
+        val lat = signedDegrees(latValue, latRef, 'S') ?: return null
+        val lng = signedDegrees(lngValue, lngRef, 'W') ?: return null
+        if (lat == 0.0 && lng == 0.0) return null
+        if (abs(lat) > 90.0 || abs(lng) > 180.0) return null
+        return doubleArrayOf(lat, lng)
+    }
+
+    private fun signedDegrees(value: String?, ref: String?, negative: Char): Double? {
+        val degrees = degreesOf(value ?: return null) ?: return null
+        val sign = if (ref?.trim()?.uppercase(Locale.US)?.firstOrNull() == negative) -1.0 else 1.0
+        return sign * degrees
+    }
+
+    private fun degreesOf(value: String): Double? {
+        val parts = value.split(',')
+        if (parts.size > 3) return null
+        var total = 0.0
+        var unit = 1.0
+        for (part in parts) {
+            val rational = part.split('/')
+            if (rational.size != 2) return null
+            val numerator = rational[0].trim().toDoubleOrNull() ?: return null
+            val denominator = rational[1].trim().toDoubleOrNull() ?: return null
+            if (denominator == 0.0) return null
+            total += (numerator / denominator) / unit
+            unit *= 60.0
+        }
+        return total.takeIf { it.isFinite() }
+    }
+
+    internal fun isoTimeOf(exifDateTime: String?): String? {
+        val matched = EXIF_DATE_TIME.find(exifDateTime?.trim().orEmpty()) ?: return null
+        val (year, month, day, hour, minute, second) = matched.destructured
+        if (month.toInt() !in 1..12 || day.toInt() !in 1..31) return null
+        if (hour.toInt() > 23 || minute.toInt() > 59 || second.toInt() > 59) return null
+        return "$year-$month-${day}T$hour:$minute:$second"
+    }
+
     private fun extract(activity: Activity, uri: Uri, stats: ExtractStats): PhotoMeta? {
         val exif = readExif(activity, uri, stats) ?: return null
 
-        val latLong: DoubleArray? = exif.latLong
-
-        val takenAt = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
-            ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
-        val isoTime = takenAt?.let {
-            try {
-                val parsed = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
-                    .apply { isLenient = false }
-                    .parse(it)
-                parsed?.let { d -> SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(d) }
-            } catch (_: Exception) {
-                null
-            }
-        }
+        val latLong: DoubleArray? = gpsOf(exif)
+        val isoTime = isoTimeOf(
+            exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                ?: exif.getAttribute(ExifInterface.TAG_DATETIME),
+        )
 
         if (latLong == null && isoTime == null) return null
         return PhotoMeta(
@@ -206,13 +250,13 @@ object PhotoBridge {
         )
     }
 
-    internal fun copyOriginalsToCache(activity: Activity, uris: List<Uri>, stats: ExtractStats): List<Uri> {
+    private fun copyOriginalsToCache(activity: Activity, uris: List<Uri>, stats: ExtractStats): List<Uri> {
         val dir = File(activity.cacheDir, CACHE_DIR).apply { mkdirs() }
         val out = mutableListOf<Uri>()
         uris.take(MAX_PHOTOS).forEachIndexed { i, uri ->
             val file = try {
                 PhotoSource(activity, uri, stats).use { src ->
-                    downscaleWithExif(activity, src, dir, i) ?: copyRaw(activity, src, dir, i)
+                    downscaleWithExif(src, dir, i) ?: copyRaw(activity, src, dir, i)
                 }
             } catch (e: Exception) {
                 logSkipped(uri, e)
@@ -264,9 +308,9 @@ object PhotoBridge {
             ?: "bin"
     }
 
-    private fun downscaleWithExif(activity: Activity, src: PhotoSource, dir: File, index: Int): File? {
+    private fun downscaleWithExif(src: PhotoSource, dir: File, index: Int): File? {
         val exif = src.open()?.let { readExif(it, src.uri) } ?: throw IOException("EXIF unreadable")
-        val latLong: DoubleArray? = exif.latLong
+        val latLong: DoubleArray? = gpsOf(exif)
         val dateTimeOriginal = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
         val dateTime = exif.getAttribute(ExifInterface.TAG_DATETIME)
         val orientation =
@@ -282,10 +326,9 @@ object PhotoBridge {
         val decodeStream = src.open() ?: throw IOException("could not reopen for decode")
         val decoded = decodeStream.use { BitmapFactory.decodeStream(it, null, opts) }
             ?: throw IOException("bitmap decode failed (${bounds.outWidth}x${bounds.outHeight}, sample $sample)")
-        val keepAlpha = decoded.hasAlpha()
         val scale = minOf(1f, SHARE_MAX_DIM.toFloat() / maxOf(decoded.width, decoded.height))
         val needsTransform = orientation in ExifInterface.ORIENTATION_FLIP_HORIZONTAL..ExifInterface.ORIENTATION_ROTATE_270
-        val bakeTransform = needsTransform && (scale < 1f || keepAlpha)
+        val bakeTransform = needsTransform && scale < 1f
         val matrix = Matrix().apply {
             if (scale < 1f) postScale(scale, scale)
             when (orientation) {
@@ -307,17 +350,16 @@ object PhotoBridge {
                 ExifInterface.ORIENTATION_ROTATE_270 -> postRotate(-90f)
             }
         }
-        val file = newCacheFile(dir, index, if (keepAlpha) "png" else "jpg")
-        val format = if (keepAlpha) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+        val file = newCacheFile(dir, index, "jpg")
         val orientationTag = if (needsTransform && !bakeTransform) orientation else null
         val written = try {
-            val finalBitmap = if (scale < 1f || bakeTransform) {
+            val finalBitmap = if (scale < 1f) {
                 Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
             } else {
                 decoded
             }
             try {
-                file.outputStream().use { finalBitmap.compress(format, SHARE_JPEG_QUALITY, it) }
+                file.outputStream().use { finalBitmap.compress(Bitmap.CompressFormat.JPEG, SHARE_JPEG_QUALITY, it) }
             } finally {
                 if (finalBitmap !== decoded) finalBitmap.recycle()
             }
@@ -361,10 +403,10 @@ object PhotoBridge {
     private fun shareAction(count: Int): String =
         if (count == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE
 
-    internal fun shareMimeTypes(activity: Activity, uris: List<Uri>): Set<String> =
+    private fun shareMimeTypes(activity: Activity, uris: List<Uri>): Set<String> =
         uris.mapTo(mutableSetOf()) { activity.contentResolver.getType(it) ?: "image/jpeg" }
 
-    internal fun buildShareIntent(activity: Activity, uris: List<Uri>, action: String, types: Set<String>): Intent {
+    private fun buildShareIntent(activity: Activity, uris: List<Uri>, action: String, types: Set<String>): Intent {
         val send = if (action == Intent.ACTION_SEND) {
             Intent(action).apply { putExtra(Intent.EXTRA_STREAM, uris[0]) }
         } else {
@@ -394,7 +436,7 @@ object PhotoBridge {
         }
     }
 
-    internal class WebApkTargets(private val activity: Activity, private val packages: Set<String>) {
+    private class WebApkTargets(private val activity: Activity, private val packages: Set<String>) {
         fun isEmpty(): Boolean = packages.isEmpty()
 
         fun find(action: String, type: String): ComponentName? {
@@ -412,7 +454,7 @@ object PhotoBridge {
         }
     }
 
-    internal fun webApkTargets(activity: Activity): WebApkTargets {
+    private fun webApkTargets(activity: Activity): WebApkTargets {
         val host = Uri.parse(TARGET_URL).host
         val packages = mutableSetOf<String>()
         if (host != null) {
@@ -509,21 +551,6 @@ object PhotoBridge {
         }
         extractAndOpenAll(activity, uris)
     }
-
-    fun shareSheetAsync(activity: Activity, uris: List<Uri>, onDone: (Outcome) -> Unit) = runAsync(activity, onDone) {
-        val stats = ExtractStats()
-        val shared = copyOriginalsToCache(activity, uris, stats)
-        if (shared.isEmpty()) return@runAsync Outcome.Error(emptyBatchError(stats))
-        val send = buildShareIntent(activity, shared, shareAction(shared.size), shareMimeTypes(activity, shared))
-        Outcome.Launch(
-            Intent.createChooser(send, activity.getString(R.string.share_chooser_title)),
-            R.string.err_launch_failed,
-            partialNotice(activity, uris.size, shared.size),
-        )
-    }
-
-    fun extractAndOpenAllAsync(activity: Activity, uris: List<Uri>, onDone: (Outcome) -> Unit) =
-        runAsync(activity, onDone) { extractAndOpenAll(activity, uris) }
 
     fun onPermissionDenied(activity: Activity, denied: List<String>): Int {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&

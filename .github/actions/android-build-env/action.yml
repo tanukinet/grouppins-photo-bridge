@@ -1,0 +1,24 @@
+name: android-build-env
+description: JDK 17、Android SDK 35、Gradle 8.7 を用意する (release と ci で共用)
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Install Android SDK packages
+      shell: bash
+      run: |
+        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+        "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+    - name: Install Gradle 8.7
+      shell: bash
+      run: |
+        curl -sSLo /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+        echo "544c35d6bd849ae8a5ed0bcea39ba677dc40f49df7d1835561582da2009b961d  /tmp/gradle.zip" | sha256sum -c -
+        unzip -q /tmp/gradle.zip -d "$HOME/tools"
+        echo "$HOME/tools/gradle-8.7/bin" >> "$GITHUB_PATH"
