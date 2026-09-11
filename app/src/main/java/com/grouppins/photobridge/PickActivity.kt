@@ -65,6 +65,8 @@ class PickActivity : Activity() {
         awaitingResult = false
         processingUris = null
         processingRetried = false
+        // 前の要求で出した通知が残っていると、新しい選択の最中に OK を押されて finish() する
+        dismissNotice()
         runWhenResumed { startPicking() }
     }
 
@@ -223,7 +225,7 @@ class PickActivity : Activity() {
     }
 
     private fun showNoticeThenFinish(titleRes: Int, messageRes: Int) = runWhenResumed {
-        notice?.dismiss()
+        dismissNotice()
         notice = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(titleRes)
             .setMessage(messageRes)
@@ -233,11 +235,15 @@ class PickActivity : Activity() {
             .show()
     }
 
-    override fun onDestroy() {
-        // 終了させるための listener なので、破棄に伴う dismiss では呼ばせない
+    // 終了させるための listener なので、作り直しや破棄に伴う dismiss では呼ばせない
+    private fun dismissNotice() {
         notice?.setOnDismissListener(null)
         notice?.dismiss()
         notice = null
+    }
+
+    override fun onDestroy() {
+        dismissNotice()
         super.onDestroy()
     }
 }

@@ -113,6 +113,18 @@ GPS と撮影日時を書き戻したコピーを PWA へ渡すのがこのア�
    枚数・形式を受け付けない場合は、座標のみの URL (`?photo_batch=`。1 枚でも同じ形) を
    ブラウザで開く経路へ自動フォールバックする
 
+渡すコピーは長辺 4096px を上限に縮小した **JPEG (品質 85)** で、4096px 以下の写真は縮小せず
+再エンコードだけ行う。EXIF は GPS と日時タグ (`DateTimeOriginal` = 撮影日時、`DateTime` =
+更新日時) を **原本にあるものだけ** 書き戻す (機種名・メーカーノート等は落ちる。原本に無い
+撮影日時を更新日時から作ることはしない)。向きは `createBitmap` で縮める写真ではピクセルに
+焼き込み、そのまま書き出す写真では `Orientation` タグで伝える (`inSampleSize` だけで 4096px
+以下に収まった写真は後者になる)。上限の 4096px は GroupPins の `photo_quality` の最大段に
+合わせた値で、プランごとの縮小は PWA とサーバーが行う。透過を持つ画像も JPEG になる
+(PWA の EXIF 読み取りが JPEG しか対応していないため。透過部分は黒くなる)。
+デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残るが、画像以外が
+混ざったバッチは直接共有せず座標のみ URL へ落ちる)。EXIF を読めない・書き戻せない写真や、
+GPS 付きの原本を開けない写真は原本で代替せずに除外し、「N 枚中 M 枚」のトーストで知らせる。
+
 ### 写真へのアクセスを「すべて許可」に変える
 
 ランチャーにアイコンが出ないため、権限の変更は端末の設定アプリから行う。
@@ -134,18 +146,6 @@ adb shell dumpsys package com.grouppins.photobridge | grep -E "READ_MEDIA_IMAGES
 
 `READ_MEDIA_IMAGES` が `granted=true` なら「すべて許可」になっている。
 `READ_MEDIA_VISUAL_USER_SELECTED` だけが `granted=true` なら部分許可の状態。
-
-渡すコピーは長辺 4096px を上限に縮小した **JPEG (品質 85)** で、4096px 以下の写真は縮小せず
-再エンコードだけ行う。EXIF は GPS と日時タグ (`DateTimeOriginal` = 撮影日時、`DateTime` =
-更新日時) を **原本にあるものだけ** 書き戻す (機種名・メーカーノート等は落ちる。原本に無い
-撮影日時を更新日時から作ることはしない)。向きは `createBitmap` で縮める写真ではピクセルに
-焼き込み、そのまま書き出す写真では `Orientation` タグで伝える (`inSampleSize` だけで 4096px
-以下に収まった写真は後者になる)。上限の 4096px は GroupPins の `photo_quality` の最大段に
-合わせた値で、プランごとの縮小は PWA とサーバーが行う。透過を持つ画像も JPEG になる
-(PWA の EXIF 読み取りが JPEG しか対応していないため。透過部分は黒くなる)。
-デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残るが、画像以外が
-混ざったバッチは直接共有せず座標のみ URL へ落ちる)。EXIF を読めない・書き戻せない写真や、
-GPS 付きの原本を開けない写真は原本で代替せずに除外し、「N 枚中 M 枚」のトーストで知らせる。
 
 ## 入手
 
@@ -322,7 +322,10 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   配列は「拒否か中断か」を分けるためだけに見る)。部分許可のときだけはトーストではなく
   `AlertDialog` を出す (`PickActivity.fail` が文字列で振り分ける)。権限の変更手順は数行あり、
   トーストでは読み切る前に消えるため。OK・Back・外側タップのどれでも `finish()` して、
-  透明な画面が残らないようにする。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
+  透明な画面が残らないようにする。閉じる処理は `dismissNotice` に集約し、`onNewIntent`
+  (カメラボタンの押し直し) と `onDestroy` と出し直しの前で呼ぶ。listener を外してから
+  閉じるのは、外さずに閉じると終了用の `finish()` が走り、新しい選択が始まった直後に
+  打ち切られてしまうため。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
   起動のたびに再要求する。部分許可からの拡張は `READ_MEDIA_IMAGES` の明示的な再要求でしか
   起きないため、`READ_MEDIA_VISUAL_USER_SELECTED` が付いていても要求を省かない
   (宣言自体を外すと Android 14 は compatibility mode になり、セッション限りの一時付与と
@@ -400,6 +403,10 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   `lintDebug` を実行する。`push` にブランチ絞りを入れているのは、PR を開いているブランチで
   1 回の push につき `push` と `pull_request` の 2 回走るのと、タグ push で release と同じ検査が
   二重に走るのを避けるため。代わりに PR を開いていないブランチへの push では走らない
+- `concurrency` の group は PR 番号 (無ければ SHA) で、連続 push では古い実行を打ち切る。
+  main への push は SHA ごとに別グループになるため打ち切りも待ちも起きない。group を
+  `github.ref` にして `cancel-in-progress` だけ main で false にすると、GitHub が「実行中と
+  同じグループの待機中の実行」を新しい方で取り消すので、連続マージで途中のコミットの記録が消える
 - `INTERNET` 権限の不在の検査は `.github/scripts/verify-apk.sh` に置き、ci (debug APK) と
   release (署名済み APK) の両方から呼ぶ。release だけで検査すると、主張が崩れたことに気付くのが
   タグを打った後になる。release は署名鍵を復号する前にテストと lint も通す。タグ push では ci が
