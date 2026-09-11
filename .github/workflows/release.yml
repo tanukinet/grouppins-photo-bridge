@@ -41,8 +41,9 @@ jobs:
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
-      # 署名鍵を復号する前にテストと lint を通す。ci workflow はタグ push でも走るが
-      # release はそれに依存していないため、ここで通さないと赤いコミットの APK が公開される
+      # 署名鍵を復号する前にテストと lint を通す。ci workflow はタグ push では走らず、
+      # 走ったとしても release はそれに依存していないため、ここで通さないと
+      # 赤いコミットの APK が公開される
       - name: Test and lint
         run: gradle testDebugUnitTest lintDebug --no-daemon
 

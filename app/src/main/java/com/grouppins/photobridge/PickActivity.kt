@@ -2,8 +2,11 @@ package com.grouppins.photobridge
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.DialogInterface
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +30,7 @@ class PickActivity : Activity() {
     private var processingGeneration = 0
     private var resumed = false
     private var whenResumed: (() -> Unit)? = null
+    private var notice: AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,6 +67,8 @@ class PickActivity : Activity() {
         awaitingResult = false
         processingUris = null
         processingRetried = false
+        // 前の要求で出した通知が残っていると、新しい選択の最中に閉じられて finish() する
+        dismissNotice()
         runWhenResumed { startPicking() }
     }
 
@@ -126,6 +132,18 @@ class PickActivity : Activity() {
     private fun granted(permission: String): Boolean =
         checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
+    // 押し直しの onNewIntent が awaitingResult を倒すので、そこから先に届く結果は前の要求の
+    // もの。deliver の世代ガードと同じ扱いで捨てる。残すと、押し直しで予約した startPicking を
+    // 古い権限結果のダイアログが whenResumed 上で上書きし、ピッカーが開かないまま終わる
+    private fun consumeAwaitedResult(what: String): Boolean {
+        if (!awaitingResult) {
+            Log.w(TAG, "dropping a stale $what result superseded by a newer request")
+            return false
+        }
+        awaitingResult = false
+        return true
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -133,7 +151,7 @@ class PickActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQ_PERMS) return
-        awaitingResult = false
+        if (!consumeAwaitedResult("permission")) return
         val denied = requiredPermissions().filterNot(::granted)
         when {
             denied.isEmpty() -> launchPicker()
@@ -163,7 +181,7 @@ class PickActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQ_PICK) return
-        awaitingResult = false
+        if (!consumeAwaitedResult("picker")) return
         val clipUris = data?.clipData?.let { clip ->
             (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
         }.orEmpty()
@@ -209,8 +227,80 @@ class PickActivity : Activity() {
         if (resumed) action() else whenResumed = action
     }
 
+    // 権限の変更手順を読ませてから終わる必要があるものだけダイアログにする。トーストは
+    // 数秒で消えるので手順が読み切れない。判断はここ 1 箇所に置き、呼び出し側は fail のまま
     private fun fail(messageRes: Int) {
+        val titleRes = noticeTitleOf(messageRes)
+        if (titleRes != null) {
+            showNoticeThenFinish(titleRes, noticeMessageOf(messageRes))
+            return
+        }
         Toast.makeText(this, messageRes, Toast.LENGTH_LONG).show()
         finish()
+    }
+
+    // 変更手順を伴う失敗だけがタイトルを持つ。null ならトーストで読み切れる短さ
+    private fun noticeTitleOf(messageRes: Int): Int? = when (messageRes) {
+        R.string.err_partial_media -> R.string.err_partial_media_title
+        R.string.err_no_permission_settings -> R.string.err_no_permission_title
+        else -> null
+    }
+
+    // 理由の文言に共通の手順をつなぐ。手順を文言ごとに写すと片方だけ古くなる。書式引数は
+    // 手順の側にしかないので、getString に引数を渡すのもここだけ
+    private fun noticeMessageOf(reasonRes: Int): String = getString(reasonRes) + "\n\n" +
+        getString(R.string.msg_permission_steps, getString(R.string.app_name))
+
+    // DeviceDefault の既定はダーク系で、DayNight に公開の Dialog.Alert 子孫が無い。
+    // ライトモードの端末に暗いダイアログを出さないよう、ここで明暗を選ぶ
+    private fun dialogTheme(): Int =
+        if ((resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        ) {
+            android.R.style.Theme_DeviceDefault_Dialog_Alert
+        } else {
+            android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
+        }
+
+    private fun showNoticeThenFinish(titleRes: Int, message: String) = runWhenResumed {
+        dismissNotice()
+        val dialog = AlertDialog.Builder(this, dialogTheme())
+            .setTitle(titleRes)
+            .setMessage(message)
+            // 本文が押すよう指示しているボタンを主要位置 (右端) に置く
+            .setPositiveButton(R.string.action_open_settings, null)
+            .setNegativeButton(R.string.action_close, null)
+            // 閉じるのも Back も外側タップも終了させる。放置すると透明な画面が残る
+            .setOnDismissListener {
+                notice = null
+                finish()
+            }
+            .show()
+        // Builder に渡した listener はボタンを押すと必ず閉じる。設定アプリを開けなかったときは
+        // 代替手順を読み直せるよう残したいので、show() の後で listener を差し替える
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            val failure = PhotoBridge.openAppSettings(this)
+            if (failure != null) {
+                Toast.makeText(this, failure, Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            dismissNotice()
+            finish()
+        }
+        notice = dialog
+    }
+
+    // 終了させるための listener なので、作り直しや破棄に伴う dismiss では呼ばせない
+    private fun dismissNotice() {
+        notice?.let {
+            it.setOnDismissListener(null)
+            it.dismiss()
+        }
+        notice = null
+    }
+
+    override fun onDestroy() {
+        dismissNotice()
+        super.onDestroy()
     }
 }

@@ -101,13 +101,19 @@ GPS と撮影日時を書き戻したコピーを PWA へ渡すのがこのア�
    このアプリが開く
 2. 初回はここで権限 (メディアの位置情報 + 写真へのアクセス) を要求する。写真へのアクセスは
    **「すべて許可」が必要**で、Android 14 以降の「写真を選択」(一部のみ) は権限不足として扱い、
-   ピッカーを開かずに終了する (部分許可では選択外の写真の GPS を読めないため)。
-   カメラボタンをもう一度押すと選び直せる
-3. ファイル選択 (SAF) で写真を選ぶ (複数可、上限 50 枚)
-4. 写真の縮小コピーを cache に作り、**GroupPins の WebAPK (インストール済み PWA) の
+   ピッカーを開かない (部分許可では選択外の写真の GPS を読めないため)。権限が足りないときは
+   理由と変更手順と「設定を開く」ボタンを載せた警告ダイアログを出す (部分許可のときも、
+   完全に拒否されたときも同じ形)。「設定を開く」はこのアプリのアプリ情報画面へ直接飛び、
+   そのまま終了する。「閉じる」・Back・外側タップでも終了する。ダイアログの手順は
+   アプリ情報画面が起点なので、下の
+   [写真へのアクセスを「すべて許可」に変える](#写真へのアクセスをすべて許可に変える) から
+   設定アプリを辿る最初の 1 段を省いたもの
+3. 手順どおりに権限を変えたら、カメラボタンをもう一度押す (権限が足りていれば出ない分岐)
+4. ファイル選択 (SAF) で写真を選ぶ (複数可、上限 50 枚)
+5. 写真の縮小コピーを cache に作り、**GroupPins の WebAPK (インストール済み PWA) の
    share Activity へ写真ごと直接共有**して自動で戻る (共有シートは出ない)。
    受け取りは PWA の Web Share Target (`/?shared_photos=`)
-5. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) と、WebAPK が実際に渡す
+6. WebAPK が見つからない環境 (PWA 未インストール / Chrome 以外) と、WebAPK が実際に渡す
    枚数・形式を受け付けない場合は、座標のみの URL (`?photo_batch=`。1 枚でも同じ形) を
    ブラウザで開く経路へ自動フォールバックする
 
@@ -122,6 +128,30 @@ GPS と撮影日時を書き戻したコピーを PWA へ渡すのがこのア�
 デコードできない形式だけは原本をそのままコピーする (この場合 EXIF は全て残るが、画像以外が
 混ざったバッチは直接共有せず座標のみ URL へ落ちる)。EXIF を読めない・書き戻せない写真や、
 GPS 付きの原本を開けない写真は原本で代替せずに除外し、「N 枚中 M 枚」のトーストで知らせる。
+
+### 写真へのアクセスを「すべて許可」に変える
+
+ランチャーにアイコンが出ないため、権限の変更は端末の設定アプリから行う。警告ダイアログの
+「設定を開く」を押した場合はアプリ情報画面が直接開くので、手順 1 は飛ばしてよい
+(ダイアログに出る手順は、この一覧から手順 1 を省いたもの)。
+
+1. 端末の「設定」→「アプリ」→「**GroupPins 写真取込**」
+2. 「権限」→「写真と動画」
+3. 「**常にすべて許可**」を選ぶ
+4. 「メディアの位置情報」も許可する
+
+項目名は Android のバージョンと端末によって少し違う (「すべて許可」「写真と動画へのフル
+アクセス」など)。「選択した写真のみ許可」のままだと、選んでいない写真の GPS を OS が
+読ませないため、このアプリは取り込みを始めずに終了する。
+
+`adb` が使えるなら、付与状況は次で確認できる。
+
+```bash
+adb shell dumpsys package com.grouppins.photobridge | grep -E "READ_MEDIA_IMAGES|ACCESS_MEDIA_LOCATION|READ_MEDIA_VISUAL_USER_SELECTED"
+```
+
+`READ_MEDIA_IMAGES` が `granted=true` なら「すべて許可」になっている。
+`READ_MEDIA_VISUAL_USER_SELECTED` だけが `granted=true` なら部分許可の状態。
 
 ## 入手
 
@@ -141,8 +171,8 @@ sha256sum -c grouppins-photo-bridge-<version>.apk.sha256
 
 CI は APK を公開する前に、単体テストと lint が通ることと、署名が有効で登録済みの鍵
 (`RELEASE_CERT_SHA256`) によるものであることと、`INTERNET` 権限が含まれないことを検証しており、
-どれかが崩れるとリリース自体が失敗する。`INTERNET` の検査は push と pull request の
-CI (debug APK) でも同じスクリプトで走る。署名者の証明書 SHA-256 は各リリースのノートに載せており、
+どれかが崩れるとリリース自体が失敗する。`INTERNET` の検査は pull request と main への push で
+走る CI (debug APK) でも同じスクリプトで走る。署名者の証明書 SHA-256 は各リリースのノートに載せており、
 `apksigner verify --print-certs` で手元の APK と突き合わせられる。ビルドの実行ログも
 各リリースのノートからたどれる。
 
@@ -277,6 +307,13 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   後から届く。`whenResumed` は 1 つしか持てないため、その古い結果が選び直しの `startPicking`
   を上書きし、放棄したバッチが新しい選択の代わりに配送されてしまう。そのため
   `processingGeneration` を持ち、`whenResumed` に入れる前に世代番号で古い結果を捨てる
+- 同じ上書きは権限要求と SAF の結果でも起きる。`onNewIntent` の後に前の要求の
+  `onRequestPermissionsResult` が届くと、古い結果のダイアログが選び直しの `startPicking` を
+  `whenResumed` 上で上書きし、押し直したのにピッカーが開かないまま終わる。`awaitingResult` は
+  要求を出したときだけ true で `onNewIntent` が倒すので、これを世代番号の代わりに使い、
+  `consumeAwaitedResult` が倒れている結果を捨てる (捨てたことは `Log.w` に残す)。
+  要求が出ている間は権限ダイアログや SAF が前面にいて Activity は resumed ではないため、
+  「`awaitingResult` が true = まだ有効な要求」と見なせる
 - `BitmapFactory.decodeStream` は `inJustDecodeBounds = true` のとき仕様上必ず null を
   返す。戻り値で成否を判定してはならず、直後の `outWidth` / `outHeight` で判定する
 - Activity が復元される (`savedInstanceState` あり) のは、権限ダイアログや SAF の裏で
@@ -290,12 +327,33 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
 - 共有先の `startActivity` は Activity が resumed のときだけ行う。Android 10 以降、
   バックグラウンドからの起動は例外を投げずに無言で捨てられるため、読み込み中に
   他アプリへ切り替えられていたら `onResume` まで遅延する
-- 権限ダイアログが中断されると `grantResults` が空で返る。これは拒否ではないので、設定画面へ
-  誘導せず「許可されませんでした」で終了する。ただしこの判定は**付与状況を見た後**に行う。
+- 権限ダイアログが中断されると `grantResults` が空で返る。これは拒否ではないので、手順を
+  読ませるダイアログは出さず「許可されませんでした」のトーストで終了する。ただしこの判定は**付与状況を見た後**に行う。
   中断されても必要な権限が全て付与されていれば (同一グループの同時付与など) そのまま
   ピッカーへ進む
 - 権限結果の判定は `requiredPermissions()` の全件が付与されたかで行う (`grantResults` の
-  配列は「拒否か中断か」を分けるためだけに見る)。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
+  配列は「拒否か中断か」を分けるためだけに見る)。変更手順を伴う失敗 (部分許可・完全拒否) は
+  トーストではなく `AlertDialog` を出す (`PickActivity.fail` が `noticeTitleOf` で振り分ける。
+  タイトルを持つものがダイアログ行き)。権限の変更手順は数行あり、トーストでは読み切る前に
+  消えるため。本文は「理由」+「共通の手順 (`msg_permission_steps`)」を `noticeMessageOf` で
+  つないで作る。手順を文言ごとに写すと片方だけ古くなるため 1 本に持ち、書式引数 (アプリ名) を
+  渡すのもここだけにしてある。`PhotoBridge.onPermissionDenied` は**どの文言を出すかを返すだけ**
+  で画面遷移はしない。設定アプリを開くのはダイアログの「設定を開く」を押したときだけで、その
+  起動は `PickActivity` が持つ。`PhotoBridge.openAppSettings` は
+  `ACTION_APPLICATION_DETAILS_SETTINGS` を `FLAG_ACTIVITY_NEW_TASK` 付きで起動する。
+  呼び出し元は起動直後に `finish()` するので、同じタスクに積むと呼び出し元が消えたタスクごと
+  履歴から外れて戻れなくなるため。「設定を開く」は本文が押すよう指示しているので positive
+  (右端) に置き、「閉じる」を negative にしている。`Builder` に渡した listener はボタンを押すと
+  必ずダイアログを閉じてしまうので、`show()` の後で positive の listener を差し替えている。
+  設定アプリを開けなかったときはダイアログを残したいため (閉じると、本文の末尾にある
+  手で辿る代替手順ごと消える)。それ以外は「閉じる」でも Back でも外側タップでも `finish()`
+  して、透明な画面が残らないようにする。ダイアログのテーマは `dialogTheme()` で明暗を選ぶ。
+  `Theme.DeviceDefault` の既定はダーク系で、`DayNight` に公開の `Dialog.Alert` 子孫が無いため。
+  閉じる処理は `dismissNotice` に集約し、`onNewIntent`
+  (カメラボタンの押し直し) と `onDestroy` と出し直しの前で呼ぶ。listener を外してから
+  閉じるのは、外さずに閉じると終了用の `finish()` が走り、新しい選択が始まった直後に
+  打ち切られてしまうため。自分で閉じた場合は dismiss listener が `notice` を `null` に戻す
+  (「`notice != null` なら出ている」を嘘にしないため)。Android 14 の部分許可は `READ_MEDIA_IMAGES` 未付与 = 権限不足として扱い、
   起動のたびに再要求する。部分許可からの拡張は `READ_MEDIA_IMAGES` の明示的な再要求でしか
   起きないため、`READ_MEDIA_VISUAL_USER_SELECTED` が付いていても要求を省かない
   (宣言自体を外すと Android 14 は compatibility mode になり、セッション限りの一時付与と
@@ -369,8 +427,16 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   provider では従来どおり読み取りごとに開き直す (打ち切りとタイムアウト予算はその開き直しにも掛かる)
 - 単体テスト (`app/src/test`) の対象は Android 実行時に依存しない純粋関数だけ
   (`coordinatesOf` / `isoTimeOf`)。`gradle testDebugUnitTest` で回り、CI (`.github/workflows/ci.yml`)
-  が push と pull request のたびに `assembleDebug` / `testDebugUnitTest` / `lintDebug` を実行する
+  が pull request のたびと main への push のたびに `assembleDebug` / `testDebugUnitTest` /
+  `lintDebug` を実行する。`push` にブランチ絞りを入れているのは、PR を開いているブランチで
+  1 回の push につき `push` と `pull_request` の 2 回走るのと、タグ push で release と同じ検査が
+  二重に走るのを避けるため。代わりに PR を開いていないブランチへの push では走らない
+- `concurrency` の group は PR 番号 (無ければ SHA) で、連続 push では古い実行を打ち切る。
+  main への push は SHA ごとに別グループになるため打ち切りも待ちも起きない。group を
+  `github.ref` にして `cancel-in-progress` だけ main で false にすると、GitHub が「実行中と
+  同じグループの待機中の実行」を新しい方で取り消すので、連続マージで途中のコミットの記録が消える
 - `INTERNET` 権限の不在の検査は `.github/scripts/verify-apk.sh` に置き、ci (debug APK) と
   release (署名済み APK) の両方から呼ぶ。release だけで検査すると、主張が崩れたことに気付くのが
-  タグを打った後になる。release は署名鍵を復号する前にテストと lint も通す (ci はタグ push でも
-  走るが、release がそれに依存していないため、ここで通さないと赤いコミットの APK が公開される)
+  タグを打った後になる。release は署名鍵を復号する前にテストと lint も通す。タグ push では ci が
+  走らず、走ったとしても release はそれに依存しないので、ここで通さないと赤いコミットの APK が
+  公開される
