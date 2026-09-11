@@ -584,6 +584,8 @@ object PhotoBridge {
         extractAndOpenAll(activity, uris, stats)
     }
 
+    // 何が足りないかを判定して伝える文言を返すだけ。画面遷移はしない。設定アプリを開くのは
+    // ダイアログのボタンを押したときだけで、その起動は PickActivity が持つ
     fun onPermissionDenied(activity: Activity, denied: List<String>): Int {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
             Manifest.permission.READ_MEDIA_IMAGES in denied &&
@@ -595,21 +597,19 @@ object PhotoBridge {
         if (denied.any { activity.shouldShowRequestPermissionRationale(it) }) {
             return R.string.err_no_permission
         }
-        return if (openAppSettings(activity) == null) {
-            R.string.err_no_permission_settings
-        } else {
-            R.string.err_no_permission
-        }
+        return R.string.err_no_permission_settings
     }
 
     // ランチャーに入口が無いので、権限を変えられる画面はここしかない。起動できなければ
-    // 失敗のメッセージ res を返す (launch と同じ規約)
+    // 失敗のメッセージ res を返す (launch と同じ規約)。呼び出し元は起動直後に finish() する
+    // ことがあるため、設定画面は NEW_TASK で自前のタスクに置く (同じタスクに積むと、
+    // 呼び出し元が消えたタスクごと履歴から外れて戻れなくなる)
     fun openAppSettings(activity: Activity): Int? = launch(
         activity,
         Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.fromParts("package", activity.packageName, null),
-        ),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         R.string.err_no_settings,
     )
 
