@@ -4,7 +4,8 @@
     <string name="err_no_image">写真を受け取れませんでした</string>
     <string name="err_no_permission">写真と位置情報の権限が許可されませんでした (写真へのアクセスは「すべて許可」が必要です)</string>
     <string name="err_no_permission_settings">権限が拒否されています。アプリ情報の権限画面で「写真と動画」を「常にすべて許可」、「メディアの位置情報」を許可してください</string>
-    <string name="err_partial_media">写真へのアクセスが「一部のみ」になっています。すべての写真を許可してください (GroupPins のカメラボタンをもう一度押すと選び直せます)</string>
+    <string name="err_partial_media_title">写真へのアクセスが足りません</string>
+    <string name="err_partial_media">写真へのアクセスが「一部のみ」になっています。選択されていない写真は位置情報を読めないため、このままでは取り込めません。\n\n次の手順で「すべて許可」に変えてください。\n\n1. 端末の「設定」→「アプリ」→「GroupPins 写真取込」\n2. 「権限」→「写真と動画」\n3. 「常にすべて許可」を選ぶ\n4. 「メディアの位置情報」も許可する\n\n変更したら、GroupPins のカメラボタンをもう一度押してください。\n\n(項目名は Android のバージョンや端末によって少し違うことがあります)</string>
     <string name="err_no_gps">写真に位置情報がありません (元写真に GPS が無いか、クラウドのみの写真です)</string>
     <string name="err_cloud_timeout">クラウドのみの写真のため読み込めませんでした (端末に保存してから選んでください)</string>
     <string name="err_original_unavailable">GPS 付きの元写真を開けませんでした (写真へのアクセスが「一部のみ」になっていないか確認してください)</string>

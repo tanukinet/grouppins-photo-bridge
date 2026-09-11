@@ -2,6 +2,7 @@ package com.grouppins.photobridge
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -27,6 +28,7 @@ class PickActivity : Activity() {
     private var processingGeneration = 0
     private var resumed = false
     private var whenResumed: (() -> Unit)? = null
+    private var notice: AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -209,8 +211,33 @@ class PickActivity : Activity() {
         if (resumed) action() else whenResumed = action
     }
 
+    // 権限の変更手順を読ませてから終わる必要があるものだけダイアログにする。トーストは
+    // 数秒で消えるので手順が読み切れない。判断はここ 1 箇所に置き、呼び出し側は fail のまま
     private fun fail(messageRes: Int) {
+        if (messageRes == R.string.err_partial_media) {
+            showNoticeThenFinish(R.string.err_partial_media_title, messageRes)
+            return
+        }
         Toast.makeText(this, messageRes, Toast.LENGTH_LONG).show()
         finish()
+    }
+
+    private fun showNoticeThenFinish(titleRes: Int, messageRes: Int) = runWhenResumed {
+        notice?.dismiss()
+        notice = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(titleRes)
+            .setMessage(messageRes)
+            .setPositiveButton(android.R.string.ok, null)
+            // OK・Back・外側タップのどれでも終了させる。放置すると透明な画面が残る
+            .setOnDismissListener { finish() }
+            .show()
+    }
+
+    override fun onDestroy() {
+        // 終了させるための listener なので、破棄に伴う dismiss では呼ばせない
+        notice?.setOnDismissListener(null)
+        notice?.dismiss()
+        notice = null
+        super.onDestroy()
     }
 }
