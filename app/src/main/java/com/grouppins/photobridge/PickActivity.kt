@@ -228,9 +228,14 @@ class PickActivity : Activity() {
         dismissNotice()
         notice = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(titleRes)
-            .setMessage(messageRes)
+            .setMessage(getString(messageRes, getString(R.string.app_name)))
             .setPositiveButton(android.R.string.ok, null)
-            // OK・Back・外側タップのどれでも終了させる。放置すると透明な画面が残る
+            .setNeutralButton(R.string.action_open_settings) { _, _ ->
+                PhotoBridge.openAppSettings(this)?.let {
+                    Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+                }
+            }
+            // どのボタンでも Back でも外側タップでも終了させる。放置すると透明な画面が残る
             .setOnDismissListener { finish() }
             .show()
     }

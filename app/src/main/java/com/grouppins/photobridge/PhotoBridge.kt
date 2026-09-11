@@ -595,16 +595,23 @@ object PhotoBridge {
         if (denied.any { activity.shouldShowRequestPermissionRationale(it) }) {
             return R.string.err_no_permission
         }
-        val settings = Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.fromParts("package", activity.packageName, null),
-        )
-        return if (launch(activity, settings, R.string.err_no_permission) == null) {
+        return if (openAppSettings(activity) == null) {
             R.string.err_no_permission_settings
         } else {
             R.string.err_no_permission
         }
     }
+
+    // ランチャーに入口が無いので、権限を変えられる画面はここしかない。起動できなければ
+    // 失敗のメッセージ res を返す (launch と同じ規約)
+    fun openAppSettings(activity: Activity): Int? = launch(
+        activity,
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", activity.packageName, null),
+        ),
+        R.string.err_no_settings,
+    )
 
     private fun openUrl(url: Uri, notice: String? = null): Outcome =
         Outcome.Launch(Intent(Intent.ACTION_VIEW, url), R.string.err_no_browser, notice)
