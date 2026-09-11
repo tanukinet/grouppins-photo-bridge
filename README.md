@@ -141,8 +141,8 @@ sha256sum -c grouppins-photo-bridge-<version>.apk.sha256
 
 CI は APK を公開する前に、単体テストと lint が通ることと、署名が有効で登録済みの鍵
 (`RELEASE_CERT_SHA256`) によるものであることと、`INTERNET` 権限が含まれないことを検証しており、
-どれかが崩れるとリリース自体が失敗する。`INTERNET` の検査は push と pull request の
-CI (debug APK) でも同じスクリプトで走る。署名者の証明書 SHA-256 は各リリースのノートに載せており、
+どれかが崩れるとリリース自体が失敗する。`INTERNET` の検査は pull request と main への push で
+走る CI (debug APK) でも同じスクリプトで走る。署名者の証明書 SHA-256 は各リリースのノートに載せており、
 `apksigner verify --print-certs` で手元の APK と突き合わせられる。ビルドの実行ログも
 各リリースのノートからたどれる。
 
@@ -369,8 +369,12 @@ Play 配布は想定していない (Releases の APK を直接入れる)。
   provider では従来どおり読み取りごとに開き直す (打ち切りとタイムアウト予算はその開き直しにも掛かる)
 - 単体テスト (`app/src/test`) の対象は Android 実行時に依存しない純粋関数だけ
   (`coordinatesOf` / `isoTimeOf`)。`gradle testDebugUnitTest` で回り、CI (`.github/workflows/ci.yml`)
-  が push と pull request のたびに `assembleDebug` / `testDebugUnitTest` / `lintDebug` を実行する
+  が pull request のたびと main への push のたびに `assembleDebug` / `testDebugUnitTest` /
+  `lintDebug` を実行する。`push` にブランチ絞りを入れているのは、PR を開いているブランチで
+  1 回の push につき `push` と `pull_request` の 2 回走るのと、タグ push で release と同じ検査が
+  二重に走るのを避けるため。代わりに PR を開いていないブランチへの push では走らない
 - `INTERNET` 権限の不在の検査は `.github/scripts/verify-apk.sh` に置き、ci (debug APK) と
   release (署名済み APK) の両方から呼ぶ。release だけで検査すると、主張が崩れたことに気付くのが
-  タグを打った後になる。release は署名鍵を復号する前にテストと lint も通す (ci はタグ push でも
-  走るが、release がそれに依存していないため、ここで通さないと赤いコミットの APK が公開される)
+  タグを打った後になる。release は署名鍵を復号する前にテストと lint も通す。タグ push では ci が
+  走らず、走ったとしても release はそれに依存しないので、ここで通さないと赤いコミットの APK が
+  公開される

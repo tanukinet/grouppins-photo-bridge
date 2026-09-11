@@ -1,8 +1,17 @@
 name: ci
 
 on:
+  # PR は pull_request で、main はマージ後の push で検査する。push にブランチ絞りが
+  # 無いと、PR を開いているブランチで 1 回の push につき 2 回走り、タグ push でも
+  # release と同じ検査が二重に走る
   push:
+    branches: [main]
   pull_request:
+
+# 連続 push で古い実行を打ち切る。main は打ち切らない (マージ後の記録を残す)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
